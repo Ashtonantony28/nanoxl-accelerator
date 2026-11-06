@@ -102,10 +102,10 @@ def test_heldout_accuracy_budget(bundle):
         d_ce.append(ce(li, x[1:]) - ce(lf, x[1:]))
         agree.append(np.mean(lf.argmax(-1) == li.argmax(-1)))
     # Budgets: the G2 targets (+3 % / +8 % PPL). Top-1 floors set from the study windows
-    # (STUDY_SEED, docs/quant-study.md: ~0.95 W8A8, ~0.90 W4A8) minus a margin for 4-window noise.
+    # (STUDY_SEED, docs/quant-study.md: 0.946 W8A8, 0.881 W4A8) minus a margin for 4-window noise.
     budget = math.log(1.03) if name == "w8a8" else math.log(1.08)
     assert np.mean(d_ce) < budget, d_ce
-    assert np.mean(agree) > (0.92 if name == "w8a8" else 0.86), agree
+    assert np.mean(agree) > (0.92 if name == "w8a8" else 0.84), agree
 
 
 def test_bundle_schema(bundle):

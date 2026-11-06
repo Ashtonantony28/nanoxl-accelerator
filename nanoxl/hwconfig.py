@@ -23,8 +23,9 @@ class HwConfig:
     pbuf: int = 64 * KiB         # requant / LN / softmax params, GELU LUTs (ring)
     kvbuf: int = 1536 * KiB      # on-chip KV tier (URAM), or a staging ring in DDR-KV mode
     kv_onchip: bool = True
+    panel_bytes: int = 32 * KiB  # target weight-panel size; the WBUF ring holds wbuf/panel panels in flight
     # micro-architecture timing knobs
-    wload_rows_per_cycle: int = 1   # weight-buffer rows (N bytes each) moved into the array per cycle
+    wload_rows_per_cycle: int = 2   # weight-buffer rows (N bytes each) moved into the array per cycle (ADR-003)
     fill_drain: int = 0             # 0 => 2*N (skewed); GEMV mode uses N
     issue_cycles: int = 2           # command processor: cycles per 16-byte command
     fifo_depth: int = 32            # per-queue command FIFO depth
@@ -56,6 +57,6 @@ KV260 = HwConfig()
 # PYNQ-Z2: 630 KB of BRAM in total, no URAM: KV cache lives in DDR with a small staging ring.
 PYNQ_Z2 = HwConfig(name="pynq-z2", array_n=16, clock_mhz=150.0, lanes=16, ddr_gbps=1.5,
                    ddr_latency_ns=400.0, burst_bytes=128,
-                   abuf=192 * KiB, wbuf=64 * KiB, acc=96 * KiB, pbuf=32 * KiB, kvbuf=96 * KiB,
+                   abuf=192 * KiB, wbuf=64 * KiB, acc=96 * KiB, pbuf=32 * KiB, kvbuf=96 * KiB, panel_bytes=16 * KiB, wload_rows_per_cycle=1,
                    kv_onchip=False)
 BOARDS = {"kv260": KV260, "pynq-z2": PYNQ_Z2}

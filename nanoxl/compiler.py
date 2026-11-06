@@ -266,7 +266,7 @@ class Compiler:
     # -- image
     def plan_linear(self, K, N, wbits, out_bits) -> LinearPlan:
         hw, na = self.hw, self.hw.array_n
-        half = hw.wbuf // 2
+        half = min(hw.wbuf // 2, max(hw.panel_bytes, na * na))
         wb = wbits / 8
         if K > 4096:
             raise CompileError("K > 4096 violates C1")

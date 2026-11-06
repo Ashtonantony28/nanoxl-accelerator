@@ -21,7 +21,7 @@ def test_cyclemodel_dma_cost():
 
 
 def test_cyclemodel_gemm_cost():
-    hw = KV260  # N = 32
+    hw = KV260.with_(wload_rows_per_cycle=1)  # N = 32
     occ, lat, info = cost(C("GEMM", M=256, N=64, K=96), hw)
     assert occ == 32 + 2 * 3 * 256 and lat == 64 and info["macs"] == 256 * 64 * 96
     occ, lat, _ = cost(C("GEMM", M=1, N=64, K=96, gemv=1), hw)
@@ -31,7 +31,7 @@ def test_cyclemodel_gemm_cost():
 
 
 def test_cyclemodel_queues_overlap_and_semaphores():
-    hw = KV260
+    hw = KV260.with_(wload_rows_per_cycle=1)
     d = C("DMA_LOAD", rows=1, row_bytes=32 * 1000)          # 1004 occ + 75 lat
     g = C("GEMM", M=500, N=32, K=32)                        # 32 + 500 occ, 64 lat
     # independent: run in parallel
@@ -80,8 +80,11 @@ def test_cyclemodel_shakespeare_decode_vs_roofline(shk):
 def test_cyclemodel_trends(shk):
     int4 = estimate(SHAKESPEARE.with_(wbits=4), KV260, prefill_len=0)
     assert int4["decode_tok_s"] > 1.5 * shk["decode_tok_s"]
-    fast = estimate(SHAKESPEARE, KV260.with_(ddr_gbps=12, wload_rows_per_cycle=2), prefill_len=0)
+    fast = estimate(SHAKESPEARE, KV260.with_(ddr_gbps=12), prefill_len=0)
     assert fast["decode_tok_s"] > 1.2 * shk["decode_tok_s"]
+    # a 1-row/cycle weight port caps GEMV at N x f = 8 GB/s, so extra DDR bandwidth is wasted
+    narrow = estimate(SHAKESPEARE, KV260.with_(ddr_gbps=12, wload_rows_per_cycle=1), prefill_len=0)
+    assert narrow["decode_tok_s"] < 0.75 * fast["decode_tok_s"]
     b4 = estimate(SHAKESPEARE, KV260.with_(kv_onchip=False), batch=4, prefill_len=0)
     assert b4["decode_tok_s"] > 2.5 * shk["decode_tok_s"]
     assert not estimate(SHAKESPEARE, KV260, batch=4, prefill_len=0)["fits"]  # KV tier holds 1 sequence

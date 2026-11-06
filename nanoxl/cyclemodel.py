@@ -14,7 +14,9 @@ pass in stream order computes exact start/end times for this model.
 
 Per-command costs (cycles; N = array size, L = vector lanes, B = DDR bytes/cycle):
   DMA      occ = max(bytes / B, bursts) + 4     lat = DDR latency
-  GEMM     occ = wl + ceil(N_out/N) ceil(K/N) max(M, wl), wl = N / (wload_rows_per_cycle x (2 if int4))
+  GEMM     occ = wl + ceil(N_out/N) ceil(K/N) max(M, wl), wl = N / (wload_rows_per_cycle x (2 if int4));
+           the leading wl is hidden when the GEMM starts back to back with the previous GEMM
+           (double-buffered PE weight registers preload across commands)
            lat = 2N (N in GEMV mode, which bypasses skew/deskew)
   VEC/GELU occ = ceil(len / L);  REQUANT occ = M ceil(N_out / L)
   LN       occ = rows x 2 ceil(cols / L) + row latency;  SOFTMAX same with 3 passes
@@ -55,11 +57,11 @@ def cost(c: isa.Cmd, hw: HwConfig):
         tiles = _cd(N, na) * _cd(K, na)
         occ = wl + tiles * max(M, wl)
         lat = hw.fill_drain or (na if f["gemv"] else 2 * na)
-        return occ, lat, {"macs": M * N * K, "array_cycles": occ}
+        return occ, lat, {"macs": M * N * K, "preload": wl}
     if op == "ATTN_TILE":
         rows, ln = f["rows"], f["len"]
         occ = 2 * (_cd(ln, na) * 2 * max(rows, na))
-        return occ, 2 * na, {"macs": 2 * rows * ln * 64, "array_cycles": occ}
+        return occ, 2 * na, {"macs": 2 * rows * ln * 64}
     if op == "VEC":
         return _cd(f["len"], L), hw.vec_latency, {}
     if op == "GELU":
@@ -117,6 +119,7 @@ def simulate(cmds, hw: HwConfig, trace=False) -> Timeline:
     ddr = macs = 0
     max_out = 0
     tr = []
+    last_gemm_end = -10
     for i, c in enumerate(cmds):
         q = c.queue
         occ, lat, info = cost(c, hw)
@@ -140,13 +143,19 @@ def simulate(cmds, hw: HwConfig, trace=False) -> Timeline:
                 raise ModelError(f"cmd {i}: WAIT sem {s} needs signal #{need}, only {len(got)} precede it")
             start = max(start, got[need - 1])
             consumed[s] = need
+        if "preload" in info and start <= last_gemm_end + 2:
+            occ -= info["preload"]  # first weight tile was preloaded under the previous GEMM
         end = start + occ
+        if c.op == "GEMM":
+            last_gemm_end = end
         if c.op == "SIGNAL":
-            end = max(end, done_until[q])
+            # fires when every earlier command of the queue has completed; the queue itself only
+            # spends one issue slot on it and moves on
+            fire = max(end, done_until[q])
             st = sig_times.setdefault(c["sem"], [])
-            if st and end < st[-1]:
+            if st and fire < st[-1]:
                 raise ModelError("semaphore with more than one producer queue")
-            st.append(end)
+            st.append(fire)
             max_out = max(max_out, len(st) - consumed.get(c["sem"], 0))
         busy_until[q] = end
         done_until[q] = max(done_until[q], end + lat)

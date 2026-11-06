@@ -172,3 +172,15 @@ def test_compiler_real_models_fit_isa_fields(cfg):
     dec = progs[-1]
     gemm_w = sum(c["K"] * c["N"] * (0.5 if c["int4"] else 1) for c in dec.cmds if c.op == "GEMM" and not c["w_buf"])
     assert gemm_w == pytest.approx(cfg.weight_bytes, rel=0.01)  # each weight streamed once per token
+
+
+def test_compiler_sync_regression_shadow_growth():
+    """Regression: a command whose later access rect grows the shadow arrays (KV_APPEND head 1 lies
+    far beyond head 0) must still record its earlier rects; a cross-queue reader of head 0 needs a WAIT."""
+    from nanoxl.compiler import SyncBuilder
+    sb = SyncBuilder(0)
+    sb.emit(isa.C("KV_APPEND", src_addr=0, dst_addr=0, pos=0, heads=2, dh=16, ctx=4096, rows=4, src_stride=2))
+    sb.emit(isa.C("GEMM", w_trans=1, w_buf=1, w_addr=0, a_addr=4096, M=1, N=4, K=16, a_stride=1, c_stride=1))
+    s = sb.stream()
+    assert [c.op for c in s] == ["KV_APPEND", "SIGNAL", "WAIT", "GEMM", "END"]
+    check_hazards(s)

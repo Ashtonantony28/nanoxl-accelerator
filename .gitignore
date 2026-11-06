@@ -7,3 +7,4 @@ results.xml
 artifacts/ckpt/
 data/raw/
 .pytest_cache/
+tests/rtl/*.result.xml

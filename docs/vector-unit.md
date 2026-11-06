@@ -1,0 +1,243 @@
+# Vector unit (SG3 / M3a)
+
+The vector unit is an L-lane SIMD datapath that sits behind the systolic array. It does
+requantization (contract C2), elementwise integer ops and horizontal reductions. The
+special-function units (exp, recip, rsqrt, GELU) attach to a reserved hook and are SG5's
+work, which waits for ADR-002.
+
+| File | Module | What it is |
+|---|---|---|
+| `rtl/srdhm.sv` | `srdhm` | C2a SaturatingRoundingDoublingHighMul, 3 stages |
+| `rtl/requant.sv` | `requant` | C2 requantizer, L lanes, 6 stages |
+| `rtl/sat_counter.sv` | `sat_counter` | sticky saturating event counter |
+| `rtl/vec_alu.sv` | `vec_alu` | elementwise ALU, L lanes, 3 stages |
+| `rtl/vec_reduce.sv` | `vec_reduce` | sum, sum of squares, max and min across lanes and beats |
+| `rtl/vec_unit.sv` | `vec_unit` | command sequencer, stream plumbing, SFU hook |
+| `nanoxl/vec_ref.py` | | executable reference for everything below (requant comes from `nanoxl.numerics`) |
+
+Default parameters: `L` = 4 in the RTL. The KV260 configuration is `L = 64` (ADR-001 / design plan §5); ADR-003 sets the final value.
+
+## 1. Conventions
+
+- **Lanes are int32.** Every stream carries `L × 32` bits; lane `i` is bits `[32i+31:32i]`.
+  int8 and int16 operands arrive sign-extended, and results narrower than 32 bits are returned sign-extended. Packing to bytes is the buffer's job, not the vector unit's.
+- **Format codes** (`fmt`, 2 bits): `0` = int8, `1` = int16, `2` and `3` = int32.
+- **Rows and beats.** A command works on a row of `len` elements, sent as `ceil(len/L)` beats. Element `e` is lane `e mod L` of beat `e div L`.
+- **Handshake.** Every port is valid/ready. A beat moves on a rising edge when valid and ready are both high. A source holds valid and data until the beat is accepted.
+- **Stall style.** Each pipeline stalls as a whole: `in_ready = !out_valid || out_ready`. A pipeline holding `D` stages runs at full throughput while the consumer is ready. `in_ready` is combinational from `out_ready`. If that path limits timing at integration, add a skid buffer at the vec_unit boundary.
+- **RoundingDivideByPOT** (`RDivPOT(x, e)`, C2b) is `(x >> e) + (rem > thr)`, where `rem = x & (2^e-1)` and `thr = ((2^e-1) >> 1) + (x < 0)`. Exact halves round away from zero. The vector unit uses it on 32-bit values (in requant) and on 64-bit values (in the ALU), with `e` in [0, 31] in both cases.
+
+## 2. Requant (`requant`, contract C2)
+
+```
+x   = wrap32(acc + bias)
+y   = RDivPOT(SRDHM(x, mult), shift)
+out = clamp(y, int8)  if out16 = 0
+      clamp(y, int16) if out16 = 1
+```
+
+The result is bit-identical to `nanoxl.numerics.requant`. Each lane has its own `acc`, `bias`, `mult` and `shift` (one lane per output channel). `out16` applies to the whole beat.
+SRDHM is implemented for the whole int32 domain, including `INT32_MIN × INT32_MIN → INT32_MAX`. Contract-legal multipliers (`mult` ≥ 2^30) can never reach the overflow case, but the tests still exercise it with out-of-contract multipliers.
+
+**Pipeline: 6 stages, 1 beat per cycle.**
+
+| Stage | Work |
+|---|---|
+| S1 | 32-bit wrapping `acc + bias` |
+| S2 | 64-bit signed product `x · mult` (DSP) |
+| S3 | product register (DSP P register; the 32×32 product cascades over 4 DSP48E2) |
+| S4 | add the nudge (`2^30`, or `1 − 2^30` when the product is negative); C truncating `/2^31`, computed as add `2^31−1` when negative, then `>>> 31`; overflow select |
+| S5 | `RDivPOT(q, shift)` (32-bit barrel shifter) |
+| S6 | clamp to int8 or int16; saturation flag |
+
+A beat accepted at edge `k` appears on `out_*` after edge `k+5`, i.e. 6 cycles later. The test `pipeline_depth` checks this.
+
+**Saturation counting.** `out_sat[i] = saturated(i) & out_keep[i]`. The `sat_counter` adds `popcount(out_sat)` on every output transfer. It is 32 bits wide, saturates instead of wrapping, and has a sticky flag; `sat_clr` clears both. A clear in the same cycle as events keeps those events.
+
+## 3. Elementwise ALU (`vec_alu`)
+
+Each op computes an **exact** signed 64-bit intermediate `w` from the int32 lane values `a` and `b`. Nothing in the table can overflow 64 bits: `|a·b| ≤ 2^62`, and `|a·2^31| ≤ 2^62`. The unit then saturates `w` to the beat's `fmt` and returns the result sign-extended to 32 bits. The lane's saturation flag is set when `w` lies outside the `fmt` range.
+
+| op | name | `w` | operands |
+|---|---|---|---|
+| 0 | PASS | `a` (with `fmt` saturation, this is the *saturate/narrow* op) | a |
+| 1 | ADD | `a + b` (33-bit exact) | a, b |
+| 2 | SUB | `a − b` (33-bit exact) | a, b |
+| 3 | MUL | `RDivPOT(a · b, shamt)` (64-bit product, rounded right shift) | a, b |
+| 4 | MAX | `max(a, b)` | a, b |
+| 5 | MIN | `min(a, b)` | a, b |
+| 6 | SRA | `a >> shamt` (arithmetic, floor) | a |
+| 7 | SRAR | `RDivPOT(a, shamt)` (rounding arithmetic shift) | a |
+| 8 | SHL | `a · 2^shamt` (exact; saturates rather than wrapping) | a |
+| 9 | CLAMP | `min(max(a, lo), hi)`; when `lo > hi` the result is `hi` | a |
+| 10–15 | reserved | executed as PASS | a |
+
+`shamt` is 0..31, and `lo` and `hi` are int32. All of them, together with `op` and `fmt`, are **per-beat** inputs that travel down the pipeline with the data. Beats from different commands can therefore occupy the pipeline back to back.
+
+**Pipeline: 3 stages.**
+
+| Stage | Work |
+|---|---|
+| S1 | add, subtract, 32×32 multiply or compare |
+| S2 | shift, rounding or clamp |
+| S3 | `fmt` saturation and saturation flag |
+
+The ALU has its own saturation counter, which counts kept lanes on transfers.
+
+Widening rules, summarised: inputs widen to 64 bits, the op is computed exactly, and the only narrowing is the final saturate to `fmt`. Nothing wraps, with one exception: the bias add in requant wraps, because C2 requires it.
+
+## 4. Reductions (`vec_reduce`)
+
+`vec_reduce` computes four results for each row (a run of beats ending in `last`) in a single pass. It only looks at lanes whose `keep` bit is set.
+
+| Output | Width | Value |
+|---|---|---|
+| `sum` | `ACC_W` = 48, signed | Σ x |
+| `sumsq` | 48, signed | Σ x², with each x taken as **int16** (its low 16 bits) |
+| `max`, `min` | 32 | max x, min x. A row with no kept lane gives INT32_MIN for max and INT32_MAX for min |
+| `sq_err` | 1 | some kept x was outside int16, so `sumsq` is not Σx² for that row |
+
+**Width argument.** An int16 square is at most 2^30. A row of 2^17 int16 values therefore sums to at most 2^47 in `sumsq`, and a row of 2^16 int32 values to at most 2^47 in `sum`, so 48 signed bits are exact for those row lengths. A GPT-2 LayerNorm row (d = 384, or 768 for `shakespeare`-sized models) needs at most 39 or 40 bits. The tests include 384 × (−32768)², 2048 × (−32768)² = 2^41, and 384 × INT32_MIN. Longer rows wrap modulo 2^48; `vec_ref.wrap_acc` models this.
+
+LayerNorm uses `sum` and `sumsq` from the same pass. Softmax uses `max`. Squaring only int16 values keeps the unit at one 16×16 multiplier (one DSP) per lane. The design plan keeps the residual stream in int16, and any wider input raises `sq_err`.
+
+**Pipeline: 3 stages.**
+
+| Stage | Work |
+|---|---|
+| S1 | keep mask, 16×16 squares, int16 range check |
+| S2 | balanced adder and compare trees across L lanes (heap layout, L padded to a power of two) |
+| S3 | row accumulator and result register |
+
+The result is valid 3 cycles after the beat carrying `last`. A pending result that has not been taken stalls the input.
+
+## 5. Sequencer (`vec_unit`)
+
+### 5.1 Command
+
+The command is one valid/ready transfer with these fields:
+
+| Field | Bits | Meaning |
+|---|---|---|
+| `cmd_op` | 5 | opcode (§5.2) |
+| `cmd_len` | RW (16) | row length in elements; `0` is a no-op that produces nothing, including no REDUCE result |
+| `cmd_fmt` | 2 | output format. For REQUANT: `0` = int8, otherwise int16 |
+| `cmd_shamt` | 5 | ALU shift amount. For REQUANT with `p_imm`, the broadcast shift |
+| `cmd_lo`, `cmd_hi` | 32 | CLAMP bounds |
+| `cmd_b_imm`, `cmd_imm_b` | 1, 32 | when set, B is `imm_b` broadcast to every lane and the B stream is not read. For REQUANT, B is the bias |
+| `cmd_p_imm`, `cmd_mult` | 1, 32 | REQUANT only: when set, every lane uses `mult = cmd_mult` and `shift = cmd_shamt` (per-tensor scale) and the P stream is not read |
+
+### 5.2 Opcode space
+
+| `cmd_op` | Unit | Streams read | Output |
+|---|---|---|---|
+| `0x00–0x0F` | vec_alu, op = `cmd_op[3:0]` | A; B for ADD/SUB/MUL/MAX/MIN unless `b_imm` | D |
+| `0x10` | REQUANT | A = acc; B = bias unless `b_imm`; P = mult/shift unless `p_imm` | D (int8/int16 sign-extended) |
+| `0x11` | REDUCE | A | R (one result per row) |
+| `0x12–0x17` | reserved: run as ALU PASS, set sticky `illegal_op` | A | D |
+| `0x18–0x1F` | **SFU hook**; sub-op = `cmd_op[2:0]` | A | D |
+
+When the unit is built with `HAS_SFU = 0`, opcodes `0x18–0x1F` run as ALU PASS and set `illegal_op`, so a missing SFU cannot hang the unit.
+Suggested sub-op allocation for SG5, to be fixed by ADR-002: 0 exp, 1 recip, 2 rsqrt, 3 GELU LUT, 4–7 free.
+
+### 5.3 Streams
+
+| Port | Payload |
+|---|---|
+| `a_*` | `L×32` |
+| `b_*` | `L×32` |
+| `p_*` | `L×32` mult plus `L×5` shift |
+| `d_*` | output: `L×32` data, `L` keep bits, last |
+| `r_*` | REDUCE result: sum, sumsq, max, min, sq_err |
+
+A command reads exactly `ceil(len/L)` beats from each stream it uses, and writes the same number of beats to D (or one result to R). In the final beat, the lanes at positions ≥ `len`:
+
+- are zeroed before they reach any unit, so junk on those lanes cannot leak through;
+- are never counted as saturation events;
+- have `d_keep = 0` and read as 0 on D.
+
+`d_last` marks a row's final beat.
+
+### 5.4 Ordering and throughput
+
+The input side runs one command at a time. The command-accept cycle costs one idle input cycle per command. After that, beats issue at one per cycle.
+
+The output side keeps a queue of up to `RECQ = 4` elementwise commands still in flight. A row can start before the previous row has drained, and D beats always leave in command order. Each unit is in order, and the output mux only takes beats from the unit at the head of the queue. Because the ALU pipeline (3 stages) is shorter than requant (6 stages), an ALU command that directly follows a REQUANT command waits up to 3 cycles for the requant beats ahead of it. The `back_to_back_throughput` test asserts the cost model exactly:
+
+`cycles ≤ beats + commands + 3 × (REQUANT→ALU transitions) + fill`
+
+If that bubble matters for the schedule, the fix is to give the ALU path 3 more stages to match requant.
+
+### 5.5 Status
+
+| Signal | Meaning |
+|---|---|
+| `rq_sat_count`, `alu_sat_count` | 32-bit saturating counters |
+| `sat_sticky` | OR of the two sticky flags |
+| `illegal_op` | sticky |
+| `busy` | the input side is issuing, an elementwise row is draining, or a REDUCE result is pending |
+
+`stat_clr` clears the counters, the sticky flags and `illegal_op`.
+
+### 5.6 SFU hook (for SG5)
+
+`vec_unit` drives:
+```
+sfu_in_valid, sfu_in_op[2:0], sfu_in_fmt[1:0], sfu_in_shamt[4:0], sfu_in_imm[31:0],
+sfu_in_data[L*32], sfu_in_keep[L], sfu_in_last      ← sfu_in_ready
+```
+The SFU drives:
+```
+sfu_out_valid, sfu_out_data[L*32], sfu_out_keep[L], sfu_out_last ← sfu_out_ready
+```
+
+The SFU must meet four requirements:
+
+1. Emit exactly one output beat per input beat.
+2. Emit beats in order.
+3. Return `keep` and `last` unchanged.
+4. Never make `sfu_in_ready` or `sfu_out_valid` depend combinationally on the other side's valid or ready in a way that creates a loop. Registered outputs are the safe choice.
+
+Its latency is free, and it may stall. `sfu_in_op`, `sfu_in_fmt`, `sfu_in_shamt` and `sfu_in_imm` are constant for the length of a row; `imm` is `cmd_imm_b`, for example a softmax or LayerNorm scale. Lanes with `keep = 0` arrive as 0, and `vec_unit` zeroes them on D whatever the SFU returns.
+
+The cocotb bench drives this port with a behavioural SFU that has random latency and backpressure. Its function `3x + 1000·op + imm + 7·shamt + 100000·fmt` lets the bench check every forwarded field.
+To attach the real SFUs, SG5 instantiates its SFU block next to `vec_unit` with `HAS_SFU = 1` and connects the two port groups. Nothing else in `vec_unit` changes. If an SFU needs a second operand stream, extend the B-stream rule in `need_b`.
+
+## 6. Verification
+
+The verify command is `SIM=icarus python3 -m pytest -q tests/rtl -k "requant or vec"`. It also passes with `SIM=verilator`.
+
+| Test | What it checks |
+|---|---|
+| `test_vec_ref.py` (no simulator) | The RTL's exact arithmetic (64-bit product, nudge, truncation by bias-then-shift, 32-bit RDivPOT) against `numerics.requant`: 2M random samples, the full 9×9×4×32×2 extremes cross product, and a bit-level Python-int transcription. `vec_ref.alu` against a pure big-int model for all 16 opcodes. The reduce width bound. |
+| `test_requant.py` (L = 1, 4, 16) | 20k random lane-results per L, under three handshake regimes: full rate (asserts 1 beat per cycle), heavy backpressure and sparse input. Directed corners: INT32_MIN and MAX, mult = 2^30 and 2^31−1, shift = 0, 1, 30 and 31, bias wraparound both ways, exact halves in SRDHM (mult = 2^30, odd x) and in RDivPOT (both signs, every e), out-of-contract mults including INT32_MIN². Random keep and last. Exact saturation-counter value, sticky flag, `sat_clr`, pipeline depth = 6. |
+| `test_vec_alu.py` (L = 1, 4, 16) | Every op × fmt × shamt on 15 extreme values (all pairs). Rounding halves for MUL and SRAR. 20k random lane-results per op at L = 16 with ops shuffled back to back. Saturation counter, depth = 3. |
+| `test_vec_reduce.py` (L = 1, 3, 4, 16) | Random rows of 1..400 elements, including ragged final beats and randomly masked interior lanes with junk under the mask. Width-limit rows. Single-beat rows back to back. Three backpressure regimes. |
+| `test_vec_unit.py` (L = 1, 4, 16 with an SFU stub; L = 4 without) | 200–400 random commands covering every unit, reserved opcodes, `b_imm` and `p_imm`, `len` = 0, 1..5L+3 and 384, with random valid and ready on all six streams and the SFU. Every D and R beat, both saturation counters, `illegal_op` and `busy` are checked. Back-to-back throughput bound. |
+| `test_vec_sat_counter.py` | W = 6 so that saturation, clear and the sticky flag are all exercised. |
+
+Mutation sanity results are recorded in the SG3 report.
+
+## 7. Synthesis (Yosys 0.33 generic `synth`, L = 4)
+
+`tests/rtl/test_vec_synth.py` runs this synthesis. It asserts that the design synthesizes with no latches and prints the counts. The requant and vec_alu runs are in the fast tier; vec_reduce and vec_unit are marked `slow`. To rerun: `python3 -m pytest -q -s tests/rtl/test_vec_synth.py`.
+
+### 7.1 Cell counts
+
+Cell counts are generic gates after `synth -flatten`. Yosys generic synthesis maps the multipliers to gates, so these numbers measure synthesizability, not FPGA area.
+
+| Top (L = 4) | Cells | Flip-flops |
+|---|---|---|
+| `requant` | 36,403 | 1,254 |
+| `vec_alu` | 45,953 | 772 |
+| `vec_reduce` | 10,758 | 844 |
+| `vec_unit` (all of the above + sequencer) | 94,532 | 3,058 |
+
+In both `requant` and `vec_alu`, most of the cells are the four 32×32 multipliers. In `vec_alu` the 64-bit rounding barrel shifter adds to that. Vivado maps the multipliers to DSP48E2 slices (see §8).
+
+## 8. Integration notes and known limits
+
+- **DSP budget (decide in ADR-003).** At L = 64, requant needs one 32×32 multiplier per lane, which is about 4 DSP48E2s, so about 256 DSPs. The ALU MUL is also 32×32 per lane, another 256. The reduce squares are 16×16, one DSP each, so 64. That totals about 576 of the KV260's 1,248 DSPs before the array.
+  - Options: restrict ALU MUL to 16×16 operands, which the design plan's int16 residual and LayerNorm scale probably allow, or share the multiplier between requant and the ALU, since the two never run in the same cycle for the same command.
+- **Reduce tree timing.** The tree adds L lanes in a single cycle: at L = 64 that is 6 levels of 48-bit adders. At 250 MHz it may need one more pipeline register. The tree is written as a heap, so a register can be inserted at any level.
+- **Combinational `in_ready` path.** `in_ready` depends combinationally on `out_ready` (§1).

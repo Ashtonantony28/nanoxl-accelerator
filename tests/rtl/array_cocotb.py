@@ -48,8 +48,8 @@ class Harness:
     async def reset(self):
         d = self.dut
         d.rst_n.value = 0
-        for s in ("in_valid", "in_a", "in_sel", "in_tag", "w_wr_en", "w_wr_bank", "w_wr_row",
-                  "w_wr_int4", "w_wr_data"):
+        for s in ("in_valid", "in_a", "in_sel", "in_gen", "in_tag", "w_wr_en", "w_wr_bank",
+                  "w_wr_gen", "w_wr_row", "w_wr_int4", "w_wr_data"):
             getattr(d, s).value = 0
         for _ in range(3):
             await FallingEdge(d.clk)
@@ -70,8 +70,9 @@ class Harness:
     async def tick(self):
         await FallingEdge(self.dut.clk)
 
-    async def load(self, bank, w, int4=False):
-        """w: int8 [K<=N, N]. int4: values in [-8,7] sent packed (C1b) in the low N*4 bits."""
+    async def load(self, bank, w, int4=False, gen=0):
+        """w: int8 [K<=N, N]. int4: values in [-8,7] sent packed (C1b) in the low N*4 bits.
+        Writes all N rows (rows >= K as zero), one per cycle starting now."""
         d = self.dut
         k = w.shape[0]
         packed = pack_i4(w) if int4 else None
@@ -82,13 +83,14 @@ class Harness:
                 data = pack_bytes(w[r]) if r < k else 0
             d.w_wr_en.value = 1
             d.w_wr_bank.value = bank
+            d.w_wr_gen.value = gen
             d.w_wr_row.value = r
             d.w_wr_int4.value = int(int4)
             d.w_wr_data.value = data
             await self.tick()
         d.w_wr_en.value = 0
 
-    async def stream(self, a, sel, tag0=0, bubble=0.0, rng=None):
+    async def stream(self, a, sel, tag0=0, bubble=0.0, rng=None, gen=0):
         """a: int8 [M, N]. Returns the list of tags."""
         d = self.dut
         issued = []
@@ -100,6 +102,7 @@ class Harness:
             d.in_valid.value = 1
             d.in_a.value = pack_bytes(a[m])
             d.in_sel.value = sel
+            d.in_gen.value = gen
             d.in_tag.value = (tag0 + m) & 0xFF
             issued.append((tag0 + m) & 0xFF)
             await self.tick()
@@ -136,15 +139,64 @@ async def array_random_int8(dut):
         m = rng.randint(1, 3 * N)
         w = nrng.integers(-128, 128, (k, N), dtype=np.int8)
         a = nrng.integers(-128, 128, (m, k), dtype=np.int8)
-        await h.load(bank, w)
+        await h.load(bank, w, gen=(t >> 1) & 1)
         a_full = np.zeros((m, N), np.int8)
         a_full[:, :k] = a
         h.outs.clear()
-        issued = await h.stream(a_full, bank, tag, bubble=0.3, rng=rng)
+        issued = await h.stream(a_full, bank, tag, bubble=0.3, rng=rng, gen=(t >> 1) & 1)
         await h.drain()
         check(h, issued, gemm_i8(a, w))
         tag += m
     assert int(dut.hazard_seen.value) == 0
+
+
+@cocotb.test()
+async def array_tight_reuse_and_chase(dut):
+    """Both bank rules at their exact limits, back to back on one bank:
+    reuse -- row 0 of the next tile is written in the same cycle the last activation of the
+    previous tile (same bank) enters (W_r = T_last + r);
+    use   -- the first activation of the new tile enters one cycle after row 0 is written
+    (T = W_0 + 1, chasing the write wavefront).
+    Results must be exact and the generation checker silent."""
+    nrng = np.random.default_rng(60 + N)
+    h = Harness(dut)
+    await h.start()
+    ws = [nrng.integers(-128, 128, (N, N), dtype=np.int8) for _ in range(4)]
+    As = [nrng.integers(-128, 128, (N + 1, N), dtype=np.int8) for _ in range(4)]
+    await h.load(0, ws[0], gen=0)
+    issued, exp = [], []
+    for t in range(4):
+        m = As[t].shape[0]
+        st = cocotb.start_soon(h.stream(As[t], 0, 40 * t, gen=t & 1))
+        if t < 3:
+            for _ in range(m - 1):
+                await h.tick()
+            # this cycle carries the last row of tile t: write row 0 of tile t+1 now
+            cocotb.start_soon(h.load(0, ws[t + 1], gen=(t + 1) & 1))
+        issued += await st
+        exp.append(gemm_i8(As[t], ws[t]))
+        # loop: tile t+1 starts streaming now, one cycle after its row 0 was written (chase)
+    await h.drain()
+    check(h, issued, np.concatenate(exp))
+    assert int(dut.hazard_seen.value) == 0
+
+
+@cocotb.test()
+async def array_use_before_write_fires(dut):
+    """Checker sanity: streaming a new-generation tile one cycle too early (T = W_0)
+    must set hazard_seen."""
+    nrng = np.random.default_rng(70)
+    h = Harness(dut)
+    await h.start()
+    w = nrng.integers(1, 100, (N, N), dtype=np.int8)
+    a = nrng.integers(1, 100, (2, N), dtype=np.int8)
+    await h.load(0, w, gen=0)
+    await h.tick()
+    ld = cocotb.start_soon(h.load(0, w, gen=1))
+    await h.stream(a, 0, 0, gen=1)  # same cycle as the row-0 write: too early
+    await ld
+    await h.drain()
+    assert int(dut.hazard_seen.value) == 1
 
 
 @cocotb.test()
@@ -205,17 +257,17 @@ async def array_overlap_load(dut):
 
 @cocotb.test()
 async def array_hazard_checker_fires(dut):
-    """Sanity check of the simulation hazard checker: rewriting bank 0 while bank-0 rows
-    are still inside the array must set hazard_seen."""
+    """Checker sanity: rewriting bank 0 (new generation) ahead of bank-0 rows that are
+    still entering the array must set hazard_seen."""
     nrng = np.random.default_rng(40)
     h = Harness(dut)
     await h.start()
     w0 = nrng.integers(-128, 128, (N, N), dtype=np.int8)
     await h.load(0, w0)
     a0 = nrng.integers(-128, 128, (N, N), dtype=np.int8)
-    stream0 = cocotb.start_soon(h.stream(a0, 0, 0))
+    stream0 = cocotb.start_soon(h.stream(a0, 0, 0, gen=0))
     await h.tick()
-    await h.load(0, w0)
+    await h.load(0, w0, gen=1)  # overwrites bank 0 under 3 in-flight gen-0 rows
     await stream0
     await h.drain()
     assert int(dut.hazard_seen.value) == 1
@@ -240,7 +292,7 @@ async def array_reset_mid_stream(dut):
         await h.tick()
     assert not h.outs, "outputs after reset"
     # weights were cleared by reset; reload and run
-    await h.load(1, w)
-    issued = await h.stream(a, 1, 7)
+    await h.load(1, w, gen=1)
+    issued = await h.stream(a, 1, 7, gen=1)
     await h.drain()
     check(h, issued, gemm_i8(a, w))

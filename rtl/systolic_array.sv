@@ -10,13 +10,20 @@
 //   out_valid/out_psum/out_tag for that row are presented in cycle T + LAT, LAT = 2N-1.
 // The pipeline never stalls; flow control is done by credits in array_ctrl.
 //
-// Weight load: one K-row per cycle. w_wr_en writes w_wr_data into row w_wr_row of bank
-// w_wr_bank; the new value is used from the next cycle on. w_wr_int4=1 means w_wr_data
-// holds N packed INT4 weights in its low N*4 bits (C1b nibble order: element c in bits
-// [4c+3:4c]), each sign-extended to 8 bits here.
-// Bank-reuse rule (checked in simulation by hazard_seen): a write to (row r, bank b) in
-// cycle W is legal only if no valid activation tagged b sits at PE(r,c), c < N-1, in W;
-// equivalently W >= T_last(b) + r + N - 1.
+// Weight load: one K-row per cycle. w_wr_en in cycle W writes w_wr_data into row w_wr_row
+// of bank w_wr_bank. The write travels along the row with the activations: PE(r,c) is
+// written at the end of cycle W + c (a skewed write wavefront). w_wr_int4=1 means
+// w_wr_data holds N packed INT4 weights in its low N*4 bits (C1b nibble order: element c
+// in bits [4c+3:4c]), each sign-extended to 8 bits here.
+//
+// Bank rules, both relative to the activation wavefront of the same row:
+//   reuse: a write of (row r, bank b) in cycle W must not overtake an older activation of
+//          bank b in row r:  W >= T_last(b) + r  (T_last: last in_valid cycle using b);
+//   use:   an activation of the new tile must not overtake the write:  T + r >= W_r + 1.
+// Both are checked in simulation (hazard_seen) using a generation bit: in_gen/w_wr_gen
+// identify the tile; any non-zero activation that multiplies with a weight of another
+// generation (or never written since reset) sets hazard_seen. Zero activations (ragged-K
+// padding) are exempt because their product does not depend on the weight.
 module systolic_array #(
     parameter int N     = 8,
     parameter int TAG_W = 1,
@@ -30,10 +37,12 @@ module systolic_array #(
     input  logic                  in_valid,
     input  logic [N*AW-1:0]       in_a,
     input  logic                  in_sel,
+    input  logic                  in_gen,     // simulation checker only
     input  logic [TAG_W-1:0]      in_tag,
     // weight row write
     input  logic                  w_wr_en,
     input  logic                  w_wr_bank,
+    input  logic                  w_wr_gen,   // simulation checker only
     input  logic [$clog2(N)-1:0]  w_wr_row,
     input  logic                  w_wr_int4,
     input  logic [N*WW-1:0]       w_wr_data,
@@ -41,85 +50,116 @@ module systolic_array #(
     output logic                  out_valid,
     output logic [N*ACCW-1:0]     out_psum,
     output logic [TAG_W-1:0]      out_tag,
-    // simulation-only sticky bank-reuse hazard flag (0 in synthesis)
+    // simulation-only sticky hazard flag (0 in synthesis)
     output logic                  hazard_seen
 );
     localparam int LAT = 2 * N - 1;
-    localparam int LW  = AW + 2;  // {v, sel, a} per skew lane
+    localparam int RB  = $clog2(N);
+    localparam int LW  = AW + 3;        // activation skew lane {gen, v, sel, a}
+    localparam int WL  = WW + RB + 3;   // weight-write skew lane {gen, en, bank, row, w}
 
     // ---- input skew -------------------------------------------------------------------
     logic [N*LW-1:0] sk_in, sk_out;
     for (genvar r = 0; r < N; r++) begin : g_skin
-        assign sk_in[r*LW +: LW] = {in_valid, in_sel, in_valid ? in_a[r*AW +: AW] : {AW{1'b0}}};
+        assign sk_in[r*LW +: LW] = {in_gen, in_valid, in_sel,
+                                    in_valid ? in_a[r*AW +: AW] : {AW{1'b0}}};
     end
     skew #(.LANES(N), .W(LW), .REVERSE(0)) u_skew (
         .clk(clk), .rst_n(rst_n), .din(sk_in), .dout(sk_out));
 
-    // ---- weight unpack (INT4 sign extension) -------------------------------------------
-    logic [N*WW-1:0] w_row;
+    // ---- weight unpack (INT4 sign extension) and write skew ------------------------------
+    logic [N*WL-1:0] wk_in, wk_out;
     for (genvar c = 0; c < N; c++) begin : g_wunpack
-        assign w_row[c*WW +: WW] = w_wr_int4 ? {{(WW-4){w_wr_data[c*4+3]}}, w_wr_data[c*4 +: 4]}
-                                             : w_wr_data[c*WW +: WW];
+        logic [WW-1:0] wv;
+        assign wv = w_wr_int4 ? {{(WW-4){w_wr_data[c*4+3]}}, w_wr_data[c*4 +: 4]}
+                              : w_wr_data[c*WW +: WW];
+        assign wk_in[c*WL +: WL] = {w_wr_gen, w_wr_en, w_wr_bank, w_wr_row, wv};
     end
+    skew #(.LANES(N), .W(WL), .REVERSE(0)) u_wskew (
+        .clk(clk), .rst_n(rst_n), .din(wk_in), .dout(wk_out));
 
     // ---- PE grid -----------------------------------------------------------------------
     // a/v/sel buses: index (r*(N+1)+c) is the input of PE(r,c); c = N is the dangling output.
     // psum bus: index (r*N+c) is the psum input of PE(r,c); r = N is the column output.
+    // (unpacked net arrays, one element per link: much faster in Icarus than one flat bus)
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [N*(N+1)*AW-1:0]   a_bus;  // column N outputs dangle
+    wire [AW-1:0]   a_bus [0:N*(N+1)-1];  // column N outputs dangle
+    wire            v_bus [0:N*(N+1)-1];
+    wire            s_bus [0:N*(N+1)-1];
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [N*(N+1)-1:0]      v_bus, s_bus;
-    wire [(N+1)*N*ACCW-1:0] p_bus;
+    wire [ACCW-1:0] p_bus [0:(N+1)*N-1];
 
     for (genvar c = 0; c < N; c++) begin : g_ptop
-        assign p_bus[c*ACCW +: ACCW] = '0;
+        assign p_bus[c] = '0;
     end
 
     for (genvar r = 0; r < N; r++) begin : g_row
-        assign a_bus[(r*(N+1))*AW +: AW] = sk_out[r*LW +: AW];
+        assign a_bus[r*(N+1)]            = sk_out[r*LW +: AW];
         assign s_bus[r*(N+1)]            = sk_out[r*LW + AW];
         assign v_bus[r*(N+1)]            = sk_out[r*LW + AW + 1];
-        wire row_we = w_wr_en && (w_wr_row == ($clog2(N))'(r));
         for (genvar c = 0; c < N; c++) begin : g_col
             localparam int IH = r * (N + 1) + c;  // horizontal bus index of PE input
             localparam int IV = r * N + c;        // vertical bus index of PE input
+            // this column's (skewed) write: {gen, en, bank, row, w}
+            wire          wc_en   = wk_out[c*WL + WW + RB + 1];
+            wire          wc_bank = wk_out[c*WL + WW + RB];
+            wire [RB-1:0] wc_row  = wk_out[c*WL + WW +: RB];
+            wire          pe_we   = wc_en && (wc_row == RB'(r));
             pe #(.AW(AW), .WW(WW), .ACCW(ACCW)) u_pe (
                 .clk      (clk),
                 .rst_n    (rst_n),
-                .a_in     (a_bus[IH*AW +: AW]),
+                .a_in     (a_bus[IH]),
                 .a_v_in   (v_bus[IH]),
                 .a_sel_in (s_bus[IH]),
-                .a_out    (a_bus[(IH+1)*AW +: AW]),
+                .a_out    (a_bus[IH+1]),
                 .a_v_out  (v_bus[IH+1]),
                 .a_sel_out(s_bus[IH+1]),
-                .psum_in  (p_bus[IV*ACCW +: ACCW]),
-                .psum_out (p_bus[(IV+N)*ACCW +: ACCW]),
-                .w_wr_en  (row_we),
-                .w_wr_bank(w_wr_bank),
-                .w_wr_data(w_row[c*WW +: WW]));
+                .psum_in  (p_bus[IV]),
+                .psum_out (p_bus[IV+N]),
+                .w_wr_en  (pe_we),
+                .w_wr_bank(wc_bank),
+                .w_wr_data(wk_out[c*WL +: WW]));
         end
     end
 
     // ---- output deskew, valid/tag delay ---------------------------------------------------
+    logic [N*ACCW-1:0] col_out;
+    for (genvar c = 0; c < N; c++) begin : g_pbot
+        assign col_out[c*ACCW +: ACCW] = p_bus[N*N+c];
+    end
     skew #(.LANES(N), .W(ACCW), .REVERSE(1)) u_deskew (
-        .clk(clk), .rst_n(rst_n), .din(p_bus[N*N*ACCW +: N*ACCW]), .dout(out_psum));
+        .clk(clk), .rst_n(rst_n), .din(col_out), .dout(out_psum));
 
     delay_pipe #(.W(TAG_W + 1), .D(LAT)) u_vtag (
         .clk(clk), .rst_n(rst_n), .din({in_valid, in_tag}), .dout({out_valid, out_tag}));
 
-    // ---- simulation-only bank-reuse hazard checker ----------------------------------------
+    // ---- simulation-only weight-generation checker ----------------------------------------
 `ifndef SYNTHESIS
-    logic hz_now;
-    always_comb begin
-        hz_now = 1'b0;
-        for (int hr = 0; hr < N; hr++)
-            for (int hc = 0; hc < N - 1; hc++)
-                if (w_wr_en && 32'(w_wr_row) == hr && v_bus[hr*(N+1)+hc] && s_bus[hr*(N+1)+hc] == w_wr_bank)
-                    hz_now = 1'b1;
-    end
+    logic [1:0]   wsh  [0:2*N*N-1];   // per PE per bank: {written, gen}
+    logic [N-1:0] gsr  [0:N-1];       // per row: activation gen bit at columns 1..N-1
+    function automatic logic act_gen(input int r, input int c);
+        act_gen = (c == 0) ? sk_out[r*LW + AW + 2] : gsr[r][c-1];
+    endfunction
+
+    // evaluated once per clock edge on the values the PEs use in the ending cycle
     always_ff @(posedge clk) begin
-        if (!rst_n) hazard_seen <= 1'b0;
-        else if (hz_now) hazard_seen <= 1'b1;
+        if (!rst_n) begin
+            hazard_seen <= 1'b0;
+            for (int i = 0; i < 2 * N * N; i++) wsh[i] <= 2'b00;
+            for (int i = 0; i < N; i++) gsr[i] <= '0;
+        end else begin
+            for (int hr = 0; hr < N; hr++)
+                for (int hc = 0; hc < N; hc++)
+                    if (v_bus[hr*(N+1)+hc] && a_bus[hr*(N+1)+hc] != '0 &&
+                        wsh[2*(hr*N+hc) + 32'(s_bus[hr*(N+1)+hc])] != {1'b1, act_gen(hr, hc)})
+                        hazard_seen <= 1'b1;
+            for (int hr = 0; hr < N; hr++)
+                gsr[hr] <= {gsr[hr][N-2:0], sk_out[hr*LW + AW + 2]};
+            for (int hc = 0; hc < N; hc++)
+                if (wk_out[hc*WL + WW + RB + 1])
+                    wsh[2*(32'(wk_out[hc*WL + WW +: RB])*N + hc) + 32'(wk_out[hc*WL + WW + RB])]
+                        <= {1'b1, wk_out[hc*WL + WW + RB + 2]};
+        end
     end
 `else
     assign hazard_seen = 1'b0;

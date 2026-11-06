@@ -84,7 +84,7 @@ def exp2_neg_poly_i(d, coef):
     q = d >> 8
     r = d & 255
     e = ((c2 * r * r) >> 16) + ((c1 * r) >> 8) + c0
-    e = np.clip(e, 0, EXP_ONE) >> np.minimum(q, 16)
+    e = np.where(r == 0, EXP_ONE, np.clip(e, 0, EXP_ONE)) >> np.minimum(q, 16)  # pin 2^0 exactly
     return np.where(q >= 16, 0, e)
 
 

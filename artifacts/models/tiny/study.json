@@ -1,0 +1,774 @@
+{
+ "ckpt": "artifacts/models/tiny/ckpt.pt",
+ "config": {
+  "n_layer": 4,
+  "n_head": 4,
+  "n_embd": 128,
+  "block_size": 128
+ },
+ "started": "Fri Nov  6 23:46:22 2026",
+ "fp32_val_loss_full": 1.5277845533789232,
+ "eval_windows": 200,
+ "eval_tokens": 25600,
+ "fp32_val_loss_subset": 1.5327517175044114,
+ "fp32_ppl_subset": 4.630902240648697,
+ "prompts": [
+  "ssurance,\nShe is",
+  "ue to the roof o",
+  "take away this d"
+ ],
+ "fp32_gen": [
+  " the season of the deep of the courties\nOf the death of the state of the seas of his\ncontented the state of the season of the seas,\nAnd therefore the state of the season\nOf the death of the season of ",
+  "ur state and the world,\nAnd then the sea shall be the state of the seas,\nAnd therefore the state of the death of his\ncontemn'd the season of the season of the seas,\nAnd therefore the state of the seas",
+  "eath and the seat of the seas\nand the season of the season of the state,\nAnd therefore the state of the death of his\ncontemn'd the season of the season of the seas,\nAnd therefore the state of the seas"
+ ],
+ "variants": {
+  "W8A8": {
+   "val_loss": 1.5422689562121037,
+   "ppl": 4.6751860381805725,
+   "ppl_delta_pct": 0.9562671641643705,
+   "top1_agree_teacher_forced": 0.945859375,
+   "sat_events": 309,
+   "sat_by_op": {
+    "h0.ln_1": 1,
+    "h0.c_attn": 2,
+    "h0.pv": 29,
+    "h0.ln_2": 8,
+    "h1.ln_1": 3,
+    "h1.c_attn": 20,
+    "h1.pv": 32,
+    "h1.ln_2": 18,
+    "h1.c_fc": 6,
+    "h2.ln_1": 2,
+    "h2.c_attn": 39,
+    "h2.pv": 58,
+    "h2.ln_2": 6,
+    "h2.c_fc": 1,
+    "h3.ln_1": 2,
+    "h3.c_attn": 57,
+    "h3.ln_2": 1,
+    "h3.c_fc": 23,
+    "ln_f": 1
+   },
+   "seconds": 465.9419436454773,
+   "greedy_agreement": [
+    {
+     "first_divergence": 8,
+     "match_frac": 0.105
+    },
+    {
+     "first_divergence": 40,
+     "match_frac": 0.3
+    },
+    {
+     "first_divergence": 5,
+     "match_frac": 0.11
+    }
+   ],
+   "gen": [
+    " the seated of the season of the death\nOf the death of the state of the seas of the seas,\nAnd the state of the senate that she shall sharp the state,\nAnd therefore the season of the death of his\ncourt",
+    "ur state and the world,\nAnd then the seasons of the season of the state,\nAnd then the seasons of the death of the seas,\nAnd then the season of the state of the field\nOf the death of the state of the s",
+    "eath words that have some state,\nAnd therefore the seat of the death of his\ncontempt the statue of the state of the state,\nAnd therefore the state of the season\nOf the firest of the country's son, and"
+   ],
+   "per_op": {
+    "LN ln_1 L0": {
+     "max_abs": 0.5568127777473393,
+     "mean": -0.0035035076706021098,
+     "rms": 0.28992456407914696,
+     "gain": 1.0000174588866093,
+     "n": 32768
+    },
+    "LN ln_2 L0": {
+     "max_abs": 0.5224338020162378,
+     "mean": 0.0023538381081172604,
+     "rms": 0.2891795321547252,
+     "gain": 0.9999483645430362,
+     "n": 32768
+    },
+    "softmax L0": {
+     "max_abs": 0.5025320494225589,
+     "mean": -0.034959423449612406,
+     "rms": 0.22308527779018417,
+     "gain": 1.0000208712318361,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L0": {
+     "max_abs": 0.4939921972473772,
+     "mean": -0.018925800426986408,
+     "rms": 0.2668282713291734,
+     "gain": 1.003058569638154,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L0": {
+     "max_abs": 1.2302757275065943,
+     "mean": -0.018420924704439918,
+     "rms": 0.3101915367693509,
+     "gain": 1.0029625195674963,
+     "n": 131072
+    },
+    "LN ln_1 L1": {
+     "max_abs": 0.5159959648178365,
+     "mean": -0.001382638542162174,
+     "rms": 0.28960102682939376,
+     "gain": 0.9999809998376583,
+     "n": 32768
+    },
+    "LN ln_2 L1": {
+     "max_abs": 0.5211302206837978,
+     "mean": -0.0007524725151576895,
+     "rms": 0.2897517711447675,
+     "gain": 1.0000489133749297,
+     "n": 32768
+    },
+    "softmax L1": {
+     "max_abs": 0.5809695287014449,
+     "mean": -0.017896075581395353,
+     "rms": 0.13613705723740202,
+     "gain": 1.000139912843049,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L1": {
+     "max_abs": 0.49745718105554815,
+     "mean": -0.029617108744264483,
+     "rms": 0.29080885518129246,
+     "gain": 1.0033609420120053,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L1": {
+     "max_abs": 1.3279386622313254,
+     "mean": -0.028337578339817784,
+     "rms": 0.33641161285915233,
+     "gain": 1.0034697383563644,
+     "n": 131072
+    },
+    "LN ln_1 L2": {
+     "max_abs": 0.5164935343103654,
+     "mean": -0.0007126982076880414,
+     "rms": 0.28827844993574875,
+     "gain": 1.0000086079873465,
+     "n": 32768
+    },
+    "LN ln_2 L2": {
+     "max_abs": 0.5198643376588166,
+     "mean": -3.1145108183002054e-05,
+     "rms": 0.2873311126281898,
+     "gain": 1.0001152568498757,
+     "n": 32768
+    },
+    "softmax L2": {
+     "max_abs": 0.567139023484998,
+     "mean": -0.013914123062015504,
+     "rms": 0.11801001972980996,
+     "gain": 1.0002990536154877,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L2": {
+     "max_abs": 0.4965363454393697,
+     "mean": 0.006323277384522497,
+     "rms": 0.2591404702301423,
+     "gain": 0.9978186285191175,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L2": {
+     "max_abs": 1.5450847713213633,
+     "mean": 0.006853480476433364,
+     "rms": 0.32219860578140963,
+     "gain": 0.9975155290437964,
+     "n": 131072
+    },
+    "LN ln_1 L3": {
+     "max_abs": 0.5145645374392487,
+     "mean": 0.0029967438984762136,
+     "rms": 0.28826755412990024,
+     "gain": 0.9999911463108965,
+     "n": 32768
+    },
+    "LN ln_2 L3": {
+     "max_abs": 0.5194338266057059,
+     "mean": 0.0008975325353487223,
+     "rms": 0.2899285105570607,
+     "gain": 0.9999689613997673,
+     "n": 32768
+    },
+    "softmax L3": {
+     "max_abs": 0.5972058867962886,
+     "mean": -0.03191618217054264,
+     "rms": 0.1760636565027491,
+     "gain": 1.0001244943005403,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L3": {
+     "max_abs": 0.4979874662724484,
+     "mean": -0.024699881096357502,
+     "rms": 0.2702634008652783,
+     "gain": 1.0024042594362121,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L3": {
+     "max_abs": 1.1289894097944853,
+     "mean": -0.023902779817188056,
+     "rms": 0.3010264537009322,
+     "gain": 1.0025195502420323,
+     "n": 131072
+    },
+    "LN ln_f": {
+     "max_abs": 0.5132499205224121,
+     "mean": 0.002995118228490888,
+     "rms": 0.2889613485550127,
+     "gain": 0.9999596659179529,
+     "n": 32768
+    }
+   },
+   "drift": {
+    "resid.0.in": 0.001056109643359176,
+    "resid.0.mid": 0.025484834060609987,
+    "resid.1.in": 0.03210893264431283,
+    "resid.1.mid": 0.040030807967470126,
+    "resid.2.in": 0.048631370764892906,
+    "resid.2.mid": 0.057521369317158316,
+    "resid.3.in": 0.06949685446541586,
+    "resid.3.mid": 0.07819534762159144,
+    "resid.out": 0.0776783178367452,
+    "logits": 0.07307226980997647
+   }
+  },
+  "W4A8": {
+   "val_loss": 1.5650833356270228,
+   "ppl": 4.783073519717783,
+   "ppl_delta_pct": 3.2859963601341358,
+   "top1_agree_teacher_forced": 0.8811328125,
+   "sat_events": 281,
+   "sat_by_op": {
+    "h0.ln_1": 1,
+    "h0.c_attn": 20,
+    "h0.pv": 29,
+    "h0.ln_2": 6,
+    "h1.ln_1": 3,
+    "h1.c_attn": 15,
+    "h1.pv": 20,
+    "h1.ln_2": 23,
+    "h1.c_fc": 5,
+    "h2.ln_1": 1,
+    "h2.c_attn": 21,
+    "h2.pv": 58,
+    "h2.ln_2": 8,
+    "h2.c_fc": 1,
+    "h3.ln_1": 5,
+    "h3.c_attn": 47,
+    "h3.pv": 1,
+    "h3.ln_2": 2,
+    "h3.c_fc": 13,
+    "ln_f": 2
+   },
+   "seconds": 493.84510827064514,
+   "greedy_agreement": [
+    {
+     "first_divergence": 19,
+     "match_frac": 0.14
+    },
+    {
+     "first_divergence": 8,
+     "match_frac": 0.09
+    },
+    {
+     "first_divergence": 0,
+     "match_frac": 0.07
+    }
+   ],
+   "gen": [
+    " the season of the state of the death.\n\nKING RICHARD II:\nWhat says the death of the part of the state,\nAnd therefore the state of the duke and the state,\nAnd therefore the state of the state, and ther",
+    "ur state,\nAnd therefore the seat of the state of his\ncourtering that hands the words of the world of his\ncourters that the state of the state of his son,\nAnd therefore the state of the state of the st",
+    "ay with her stay.\n\nKING RICHARD II:\nThen thou shalt not speak to the state of his\ncourtering that have strick'st and the world of his\nfaction of the world that have stain'd the wars.\n\nKING RICHARD II:"
+   ],
+   "per_op": {
+    "LN ln_1 L0": {
+     "max_abs": 0.5568127777473393,
+     "mean": -0.0035035076706021098,
+     "rms": 0.28992456407914696,
+     "gain": 1.0000174588866093,
+     "n": 32768
+    },
+    "LN ln_2 L0": {
+     "max_abs": 0.5224338020162378,
+     "mean": 0.0023538381081172604,
+     "rms": 0.2891795321547252,
+     "gain": 0.9999483645430362,
+     "n": 32768
+    },
+    "softmax L0": {
+     "max_abs": 0.5025320494225589,
+     "mean": -0.034959423449612406,
+     "rms": 0.22308527779018417,
+     "gain": 1.0000208712318361,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L0": {
+     "max_abs": 0.4939921972473772,
+     "mean": -0.018925800426986408,
+     "rms": 0.2668282713291734,
+     "gain": 1.003058569638154,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L0": {
+     "max_abs": 1.2302757275065943,
+     "mean": -0.018420924704439918,
+     "rms": 0.3101915367693509,
+     "gain": 1.0029625195674963,
+     "n": 131072
+    },
+    "LN ln_1 L1": {
+     "max_abs": 0.5159959648178365,
+     "mean": -0.001382638542162174,
+     "rms": 0.28960102682939376,
+     "gain": 0.9999809998376583,
+     "n": 32768
+    },
+    "LN ln_2 L1": {
+     "max_abs": 0.5211302206837978,
+     "mean": -0.0007524725151576895,
+     "rms": 0.2897517711447675,
+     "gain": 1.0000489133749297,
+     "n": 32768
+    },
+    "softmax L1": {
+     "max_abs": 0.5809695287014449,
+     "mean": -0.017896075581395353,
+     "rms": 0.13613705723740202,
+     "gain": 1.000139912843049,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L1": {
+     "max_abs": 0.49745718105554815,
+     "mean": -0.029617108744264483,
+     "rms": 0.29080885518129246,
+     "gain": 1.0033609420120053,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L1": {
+     "max_abs": 1.3279386622313254,
+     "mean": -0.028337578339817784,
+     "rms": 0.33641161285915233,
+     "gain": 1.0034697383563644,
+     "n": 131072
+    },
+    "LN ln_1 L2": {
+     "max_abs": 0.5164935343103654,
+     "mean": -0.0007126982076880414,
+     "rms": 0.28827844993574875,
+     "gain": 1.0000086079873465,
+     "n": 32768
+    },
+    "LN ln_2 L2": {
+     "max_abs": 0.5198643376588166,
+     "mean": -3.1145108183002054e-05,
+     "rms": 0.2873311126281898,
+     "gain": 1.0001152568498757,
+     "n": 32768
+    },
+    "softmax L2": {
+     "max_abs": 0.567139023484998,
+     "mean": -0.013914123062015504,
+     "rms": 0.11801001972980996,
+     "gain": 1.0002990536154877,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L2": {
+     "max_abs": 0.4965363454393697,
+     "mean": 0.006323277384522497,
+     "rms": 0.2591404702301423,
+     "gain": 0.9978186285191175,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L2": {
+     "max_abs": 1.5450847713213633,
+     "mean": 0.006853480476433364,
+     "rms": 0.32219860578140963,
+     "gain": 0.9975155290437964,
+     "n": 131072
+    },
+    "LN ln_1 L3": {
+     "max_abs": 0.5145645374392487,
+     "mean": 0.0029967438984762136,
+     "rms": 0.28826755412990024,
+     "gain": 0.9999911463108965,
+     "n": 32768
+    },
+    "LN ln_2 L3": {
+     "max_abs": 0.5194338266057059,
+     "mean": 0.0008975325353487223,
+     "rms": 0.2899285105570607,
+     "gain": 0.9999689613997673,
+     "n": 32768
+    },
+    "softmax L3": {
+     "max_abs": 0.5972058867962886,
+     "mean": -0.03191618217054264,
+     "rms": 0.1760636565027491,
+     "gain": 1.0001244943005403,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L3": {
+     "max_abs": 0.4979874662724484,
+     "mean": -0.024699881096357502,
+     "rms": 0.2702634008652783,
+     "gain": 1.0024042594362121,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L3": {
+     "max_abs": 1.1289894097944853,
+     "mean": -0.023902779817188056,
+     "rms": 0.3010264537009322,
+     "gain": 1.0025195502420323,
+     "n": 131072
+    },
+    "LN ln_f": {
+     "max_abs": 0.5132499205224121,
+     "mean": 0.002995118228490888,
+     "rms": 0.2889613485550127,
+     "gain": 0.9999596659179529,
+     "n": 32768
+    }
+   },
+   "drift": {
+    "resid.0.in": 0.001056109643359176,
+    "resid.0.mid": 0.05656940323906114,
+    "resid.1.in": 0.06863401230072032,
+    "resid.1.mid": 0.08595439623978302,
+    "resid.2.in": 0.09686324361767519,
+    "resid.2.mid": 0.12260388466078397,
+    "resid.3.in": 0.15427329202113313,
+    "resid.3.mid": 0.17594383111251194,
+    "resid.out": 0.18156241899913989,
+    "logits": 0.15828297163568425
+   }
+  },
+  "W8A8 res8": {
+   "val_loss": 1.693839208317356,
+   "ppl": 5.440327211965689,
+   "ppl_delta_pct": 17.47877474527746,
+   "top1_agree_teacher_forced": 0.7695703125,
+   "sat_events": 405,
+   "sat_by_op": {
+    "resid": 34,
+    "h0.ln_1": 89,
+    "h0.c_attn": 6,
+    "h0.pv": 29,
+    "h0.ln_2": 5,
+    "h0.c_fc": 2,
+    "h1.ln_1": 2,
+    "h1.c_attn": 19,
+    "h1.pv": 28,
+    "h1.ln_2": 8,
+    "h1.c_fc": 15,
+    "h2.c_attn": 31,
+    "h2.pv": 55,
+    "h2.ln_2": 6,
+    "h3.ln_1": 4,
+    "h3.c_attn": 57,
+    "h3.ln_2": 5,
+    "h3.c_fc": 7,
+    "ln_f": 3
+   },
+   "seconds": 54.93467307090759
+  },
+  "W8A8 smooth0.5": {
+   "val_loss": 1.5432317192901075,
+   "ppl": 4.679689302121213,
+   "ppl_delta_pct": 1.0535109345275684,
+   "top1_agree_teacher_forced": 0.945703125,
+   "sat_events": 416,
+   "sat_by_op": {
+    "h0.c_attn": 2,
+    "h0.pv": 29,
+    "h0.ln_2": 20,
+    "h1.ln_1": 35,
+    "h1.c_attn": 19,
+    "h1.pv": 31,
+    "h1.ln_2": 13,
+    "h1.c_fc": 7,
+    "h2.ln_1": 2,
+    "h2.c_attn": 38,
+    "h2.pv": 60,
+    "h2.ln_2": 71,
+    "h2.c_fc": 1,
+    "h3.ln_1": 3,
+    "h3.c_attn": 56,
+    "h3.ln_2": 3,
+    "h3.c_fc": 24,
+    "ln_f": 2
+   },
+   "seconds": 51.15660524368286,
+   "per_op": {
+    "softmax L0": {
+     "max_abs": 0.5025320494225589,
+     "mean": -0.034959423449612406,
+     "rms": 0.22308527779018417,
+     "gain": 1.0000208712318361,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L0": {
+     "max_abs": 0.4939921972473773,
+     "mean": -0.018925800426985738,
+     "rms": 0.26682827132917336,
+     "gain": 1.0030585696381542,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L0": {
+     "max_abs": 1.2302757275065872,
+     "mean": -0.01842092470443928,
+     "rms": 0.3101915367693508,
+     "gain": 1.002962519567496,
+     "n": 131072
+    },
+    "softmax L1": {
+     "max_abs": 0.5809695287014449,
+     "mean": -0.017896075581395353,
+     "rms": 0.13613705723740202,
+     "gain": 1.000139912843049,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L1": {
+     "max_abs": 0.49745718105553394,
+     "mean": -0.029617108744266075,
+     "rms": 0.2908088551812927,
+     "gain": 1.0033609420120058,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L1": {
+     "max_abs": 1.327938662231304,
+     "mean": -0.0283375783398189,
+     "rms": 0.33641161285915255,
+     "gain": 1.0034697383563653,
+     "n": 131072
+    },
+    "softmax L2": {
+     "max_abs": 0.567139023484998,
+     "mean": -0.013914123062015504,
+     "rms": 0.11801001972980996,
+     "gain": 1.0002990536154877,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L2": {
+     "max_abs": 0.4965363454393699,
+     "mean": 0.006323277384522914,
+     "rms": 0.2591404702301426,
+     "gain": 0.9978186285191173,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L2": {
+     "max_abs": 1.5450847713213776,
+     "mean": 0.006853480476433773,
+     "rms": 0.32219860578140985,
+     "gain": 0.9975155290437958,
+     "n": 131072
+    },
+    "softmax L3": {
+     "max_abs": 0.5972058867962886,
+     "mean": -0.03191618217054264,
+     "rms": 0.1760636565027491,
+     "gain": 1.0001244943005403,
+     "n": 66048
+    },
+    "GELU-LUT (op only) L3": {
+     "max_abs": 0.4979874662724413,
+     "mean": -0.02469988109635659,
+     "rms": 0.2702634008652781,
+     "gain": 1.002404259436212,
+     "n": 131072
+    },
+    "GELU-LUT (incl. input quant) L3": {
+     "max_abs": 1.128989409794464,
+     "mean": -0.023902779817188274,
+     "rms": 0.30102645370093184,
+     "gain": 1.0025195502420314,
+     "n": 131072
+    }
+   },
+   "drift": {
+    "resid.0.in": 0.0010561096433591758,
+    "resid.0.mid": 0.026405169744272768,
+    "resid.1.in": 0.033544542082549846,
+    "resid.1.mid": 0.03997482320068972,
+    "resid.2.in": 0.0474140735560333,
+    "resid.2.mid": 0.057252489927054076,
+    "resid.3.in": 0.07019658120963915,
+    "resid.3.mid": 0.07877425278361508,
+    "resid.out": 0.07770198969163102,
+    "logits": 0.07291426259261896
+   }
+  },
+  "W4A8 smooth0.5": {
+   "val_loss": 1.5680641725500097,
+   "ppl": 4.7973523527343085,
+   "ppl_delta_pct": 3.594334396104526,
+   "top1_agree_teacher_forced": 0.883359375,
+   "sat_events": 403,
+   "sat_by_op": {
+    "h0.c_attn": 38,
+    "h0.ln_2": 26,
+    "h1.ln_1": 35,
+    "h1.c_attn": 19,
+    "h1.pv": 26,
+    "h1.ln_2": 11,
+    "h1.c_fc": 6,
+    "h2.ln_1": 1,
+    "h2.c_attn": 27,
+    "h2.pv": 73,
+    "h2.ln_2": 60,
+    "h3.ln_1": 3,
+    "h3.c_attn": 54,
+    "h3.ln_2": 5,
+    "h3.c_fc": 17,
+    "ln_f": 2
+   },
+   "seconds": 70.7454583644867
+  },
+  "W8A8 pct99.99": {
+   "val_loss": 1.5413129306209274,
+   "ppl": 4.670718576528661,
+   "ppl_delta_pct": 0.8597965107202787,
+   "top1_agree_teacher_forced": 0.948671875,
+   "sat_events": 11035,
+   "sat_by_op": {
+    "h0.ln_1": 256,
+    "h0.c_attn": 757,
+    "h0.pv": 382,
+    "h0.ln_2": 282,
+    "h0.c_fc": 761,
+    "h1.ln_1": 335,
+    "h1.c_attn": 1049,
+    "h1.pv": 207,
+    "h1.ln_2": 219,
+    "h1.c_fc": 948,
+    "h2.ln_1": 282,
+    "h2.c_attn": 806,
+    "h2.pv": 350,
+    "h2.ln_2": 431,
+    "h2.c_fc": 1131,
+    "h3.ln_1": 310,
+    "h3.c_attn": 1028,
+    "h3.pv": 292,
+    "h3.ln_2": 191,
+    "h3.c_fc": 866,
+    "ln_f": 152
+   },
+   "seconds": 44.421292543411255
+  },
+  "W8A8 gelu-ibert": {
+   "val_loss": 1.54168847949419,
+   "ppl": 4.672472989040605,
+   "ppl_delta_pct": 0.8976814070271733,
+   "top1_agree_teacher_forced": 0.9394921875,
+   "sat_events": 335,
+   "sat_by_op": {
+    "h0.ln_1": 1,
+    "h0.c_attn": 2,
+    "h0.pv": 29,
+    "h0.ln_2": 8,
+    "h1.ln_1": 3,
+    "h1.c_attn": 27,
+    "h1.pv": 35,
+    "h1.ln_2": 14,
+    "h1.c_fc": 17,
+    "h2.ln_1": 6,
+    "h2.c_attn": 34,
+    "h2.pv": 62,
+    "h2.ln_2": 7,
+    "h2.c_fc": 1,
+    "h3.ln_1": 1,
+    "h3.c_attn": 56,
+    "h3.ln_2": 2,
+    "h3.c_fc": 30
+   },
+   "seconds": 42.546316385269165
+  },
+  "W8A8 exp-poly": {
+   "val_loss": 1.542314178406123,
+   "ppl": 4.675397465131226,
+   "ppl_delta_pct": 0.9608327312972342,
+   "top1_agree_teacher_forced": 0.94625,
+   "sat_events": 313,
+   "sat_by_op": {
+    "h0.ln_1": 1,
+    "h0.c_attn": 2,
+    "h0.pv": 29,
+    "h0.ln_2": 8,
+    "h1.ln_1": 3,
+    "h1.c_attn": 20,
+    "h1.pv": 32,
+    "h1.ln_2": 18,
+    "h1.c_fc": 6,
+    "h2.ln_1": 2,
+    "h2.c_attn": 41,
+    "h2.pv": 62,
+    "h2.ln_2": 7,
+    "h2.c_fc": 1,
+    "h3.ln_1": 2,
+    "h3.c_attn": 55,
+    "h3.ln_2": 2,
+    "h3.c_fc": 21,
+    "ln_f": 1
+   },
+   "seconds": 49.05635738372803
+  },
+  "W4A8 noclip": {
+   "val_loss": 1.5751177402644978,
+   "ppl": 4.83131042439116,
+   "ppl_delta_pct": 4.327627173455273,
+   "top1_agree_teacher_forced": 0.8715234375,
+   "sat_events": 352,
+   "sat_by_op": {
+    "h0.ln_1": 1,
+    "h0.ln_2": 11,
+    "h1.ln_1": 5,
+    "h1.c_attn": 26,
+    "h1.pv": 32,
+    "h1.ln_2": 23,
+    "h1.c_fc": 4,
+    "h2.ln_1": 3,
+    "h2.c_attn": 45,
+    "h2.pv": 86,
+    "h2.ln_2": 8,
+    "h2.c_fc": 1,
+    "h3.ln_1": 6,
+    "h3.c_attn": 67,
+    "h3.pv": 1,
+    "h3.ln_2": 2,
+    "h3.c_fc": 30,
+    "ln_f": 1
+   },
+   "seconds": 80.06032466888428
+  }
+ },
+ "synthetic_ops": {
+  "exp2 LUT (Q.15 LSB, all 65536 inputs)": {
+   "max_abs": 0.9980159591837179,
+   "mean": -0.03069389542401202,
+   "rms": 0.1398921324445184,
+   "gain": 0.9999902201433305,
+   "n": 65536
+  },
+  "exp2 shift+poly2 (Q.15 LSB)": {
+   "max_abs": 64.3971658086848,
+   "mean": -0.03856743058026202,
+   "rms": 1.7510921276496307,
+   "gain": 0.9999477709666401,
+   "n": 65536
+  },
+  "recip LUT+Newton (relative)": {
+   "max_abs": 3.027147613465786e-05,
+   "mean": -1.8239990309302811e-06,
+   "rms": 1.0226710010292301e-05,
+   "gain": 0.9999981760009691,
+   "n": 100000
+  },
+  "rsqrt LUT+Newton (relative)": {
+   "max_abs": 6.613208080086252e-05,
+   "mean": 7.75663164760296e-06,
+   "rms": 1.9003331252522785e-05,
+   "gain": 1.0000077566316476,
+   "n": 100000
+  }
+ },
+ "seconds": 132.67500638961792
+}

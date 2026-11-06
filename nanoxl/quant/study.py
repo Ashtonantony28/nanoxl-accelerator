@@ -58,8 +58,9 @@ def _win(args):
     x, = args
     g = _G["g"]
     T = len(x) - 1
+    g.sat_count.clear()
     li = g.forward(x[:T]).astype(np.float64) * g.meta["scales"]["logits"]
-    return float(ce_rows(li, x[1:]).sum()), li.argmax(-1), sum(g.sat_count.values())
+    return float(ce_rows(li, x[1:]).sum()), li.argmax(-1), dict(g.sat_count)
 
 
 def _gen(args):
@@ -185,7 +186,11 @@ def main():
     ap.add_argument("--variants", default=",".join(VARIANTS))
     ap.add_argument("--gen", type=int, default=200)
     ap.add_argument("--prompts", type=int, default=3)
+    ap.add_argument("--render", action="store_true", help="print markdown for an existing --out JSON")
     args = ap.parse_args()
+    if args.render:
+        print(render_md(args.out))
+        return
 
     import torch
     torch.set_num_threads(args.procs)
@@ -231,7 +236,9 @@ def main():
         ce = sum(o[0] for o in outs) / (len(wins) * T)
         top1 = float(np.mean([np.mean(o[1] == fp_arg[i]) for i, o in enumerate(outs)]))
         v = dict(val_loss=ce, ppl=math.exp(ce), ppl_delta_pct=100 * (math.exp(ce - fp_ce) - 1),
-                 top1_agree_teacher_forced=top1, sat_events=int(sum(o[2] for o in outs)),
+                 top1_agree_teacher_forced=top1, sat_events=int(sum(sum(o[2].values()) for o in outs)),
+                 sat_by_op={k: int(sum(o[2].get(k, 0) for o in outs)) for k in outs[0][2]
+                            if sum(o[2].get(k, 0) for o in outs)},
                  seconds=time.time() - tq)
         if gens is not None:
             agree = []
@@ -251,6 +258,42 @@ def main():
     res["synthetic_ops"] = synthetic_op_tables()
     res["seconds"] = time.time() - t0
     Path(args.out).write_text(json.dumps(res, indent=1))
+
+
+
+def render_md(path):
+    """Markdown tables from a study JSON (pasted into docs/quant-study.md)."""
+    r = json.loads(Path(path).read_text())
+    out = [f"FP32 val loss (full val split): {r['fp32_val_loss_full']:.4f} (PPL {math.exp(r['fp32_val_loss_full']):.3f}). "
+           f"Integer eval subset: {r['eval_windows']} windows × {r['config']['block_size']} = {r['eval_tokens']} tokens, "
+           f"FP32 on the same subset: loss {r['fp32_val_loss_subset']:.4f}, PPL {r['fp32_ppl_subset']:.3f}.", "",
+           "| Variant | val loss | PPL | ΔPPL vs FP32 | top-1 agree (teacher-forced) | sat events |",
+           "|---|---|---|---|---|---|"]
+    for n, v in r["variants"].items():
+        out.append(f"| {n} | {v['val_loss']:.4f} | {v['ppl']:.3f} | {v['ppl_delta_pct']:+.2f} % | "
+                   f"{v['top1_agree_teacher_forced']:.4f} | {v['sat_events']} |")
+    out += ["", "Saturation events by op (W8A8): " + json.dumps(r["variants"].get("W8A8", {}).get("sat_by_op", {})), ""]
+    out += ["Greedy decode, 200 new tokens from 16-char val prompts (first divergence index / fraction of positions equal):", "",
+            "| Prompt | W8A8 | W4A8 |", "|---|---|---|"]
+    for i, p in enumerate(r["prompts"]):
+        cells = []
+        for n in ("W8A8", "W4A8"):
+            a = r["variants"].get(n, {}).get("greedy_agreement")
+            cells.append(f"{a[i]['first_divergence']} / {a[i]['match_frac']:.2f}" if a else "-")
+        out.append(f"| `{p!r}` | {cells[0]} | {cells[1]} |")
+    v = r["variants"].get("W8A8", {})
+    if "per_op" in v:
+        out += ["", "Per-op isolated error, W8A8 (output LSB; FP32 activations quantized at the op input):", "",
+                "| Op | max abs | mean | rms | gain | n |", "|---|---|---|---|---|---|"]
+        for k, s in v["per_op"].items():
+            out.append(f"| {k} | {s['max_abs']:.3f} | {s['mean']:+.4f} | {s['rms']:.3f} | {s['gain']:.4f} | {s['n']} |")
+    out += ["", "Synthetic SFU checks:", "", "| Op | max abs | mean | rms | gain |", "|---|---|---|---|---|"]
+    for k, s in r.get("synthetic_ops", {}).items():
+        out.append(f"| {k} | {s['max_abs']:.3g} | {s['mean']:+.3g} | {s['rms']:.3g} | {s['gain']:.6f} |")
+    out += ["", "Residual-stream drift (relative L2 vs FP32, one window):", "", "| Tensor | W8A8 | W4A8 |", "|---|---|---|"]
+    for k in r["variants"].get("W8A8", {}).get("drift", {}):
+        out.append(f"| {k} | {r['variants']['W8A8']['drift'][k]:.4f} | {r['variants'].get('W4A8', {}).get('drift', {}).get(k, float('nan')):.4f} |")
+    return "\n".join(out)
 
 
 if __name__ == "__main__":

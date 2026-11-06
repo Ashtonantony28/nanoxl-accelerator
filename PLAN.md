@@ -8,7 +8,7 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 | SG1 | M0 | Train `tiny` + `shakespeare`, FP32 PPL; integer golden model of the full model; quantization study; ADR-002 freezing C5 | `pytest tests/py -k golden` | wave 1 |
 | SG2 | M2 | PE, weight-stationary systolic array (INT8 + INT4 mode), scratchpad SRAM; cocotb vs `gemm_i8` | `make test-rtl` (array tests) | wave 1 |
 | SG3 | M3a | Requant unit (C2), vector ALU (add/mul/max/shift/sat), reduction tree; cocotb vs numerics | `make test-rtl` (vec tests) | done (wave 1; spec docs/vector-unit.md) |
-| SG4 | M1 | Command ISA + encoder, compiler skeleton (tiling, buffer alloc), cycle model, roofline report; array/lane sizing ADR-003 | `pytest tests/py -k "isa or compiler or cyclemodel"` | wave 1 |
+| SG4 | M1 | Command ISA + encoder, compiler skeleton (tiling, buffer alloc), cycle model, roofline report; array/lane sizing ADR-003 | `pytest tests/py -k "isa or compiler or cyclemodel or funcsim"` | done (ADR-003 proposed) |
 | SG5 | M3b | SFUs + softmax/LayerNorm/GELU RTL per ADR-002 | | wave 2 |
 | SG6 | M4 | Command processor, DMA, AXI (cocotbext-axi), formal on FIFOs/arbiters | | wave 2 |
 | SG7 | M5 | Top-level integration; `tiny` decode bit-exact in sim; AUDIT-1 | | wave 3 |

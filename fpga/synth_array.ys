@@ -1,0 +1,26 @@
+# Generic Yosys synthesis of the systolic array core and the tile controller (N=8).
+# Run from the repo root:
+#   mkdir -p sim_build && yosys -q -l sim_build/synth_array.log fpga/synth_array.ys
+# Confirms synthesizability and reports technology-independent cell counts (docs/array.md).
+# Vendor mapping (DSP48E2 / BRAM / URAM) and timing are Vivado's job (SG9).
+
+# 1) array core, full generic gate-level synthesis
+read_verilog -sv -DSYNTHESIS rtl/pe.sv rtl/skew.sv rtl/systolic_array.sv
+chparam -set N 8 systolic_array
+synth -flatten -top systolic_array
+tee -o sim_build/synth_systolic_array_N8_gates.stat stat
+
+# 2) array core, word level (multipliers, adders, flip-flop bits)
+design -reset
+read_verilog -sv -DSYNTHESIS rtl/pe.sv rtl/skew.sv rtl/systolic_array.sv
+chparam -set N 8 systolic_array
+synth -flatten -top systolic_array -run begin:fine
+tee -o sim_build/synth_systolic_array_N8_words.stat stat
+
+# 3) tile controller (array + accumulator scratchpad + output FIFO), word level with
+#    memories kept as $mem (BRAM/URAM inference candidates)
+design -reset
+read_verilog -sv -DSYNTHESIS rtl/pe.sv rtl/skew.sv rtl/systolic_array.sv rtl/scratchpad.sv rtl/array_ctrl.sv
+chparam -set N 8 -set M_DEPTH 64 array_ctrl
+synth -flatten -top array_ctrl -run begin:fine
+tee -o sim_build/synth_array_ctrl_N8_words.stat stat

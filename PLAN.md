@@ -6,7 +6,7 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 |---|---|---|---|---|
 | SG0 | — | Scaffold, numeric contracts C1/C2, runner, CI | `make test-py` | done |
 | SG1 | M0 | Train `tiny` + `shakespeare`, FP32 PPL; integer golden model of the full model; quantization study; ADR-002 freezing C5 | `pytest tests/py -k golden` | wave 1 |
-| SG2 | M2 | PE, weight-stationary systolic array (INT8 + INT4 mode), scratchpad SRAM; cocotb vs `gemm_i8` | `make test-rtl` (array tests) | wave 1 |
+| SG2 | M2 | PE, weight-stationary systolic array (INT8 + INT4 mode), scratchpad SRAM; cocotb vs `gemm_i8` | `make test-rtl` (array tests) | done (review) |
 | SG3 | M3a | Requant unit (C2), vector ALU (add/mul/max/shift/sat), reduction tree; cocotb vs numerics | `make test-rtl` (vec tests) | wave 1 |
 | SG4 | M1 | Command ISA + encoder, compiler skeleton (tiling, buffer alloc), cycle model, roofline report; array/lane sizing ADR-003 | `pytest tests/py -k "isa or compiler or cyclemodel"` | wave 1 |
 | SG5 | M3b | SFUs + softmax/LayerNorm/GELU RTL per ADR-002 | | wave 2 |

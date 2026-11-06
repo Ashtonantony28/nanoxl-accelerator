@@ -1,0 +1,9 @@
+sim_build/
+__pycache__/
+*.pyc
+results.xml
+*.vcd
+*.fst
+artifacts/ckpt/
+data/raw/
+.pytest_cache/

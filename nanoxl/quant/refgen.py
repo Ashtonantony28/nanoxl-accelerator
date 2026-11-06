@@ -43,6 +43,7 @@ def main():
         g = golden.Golden(A, meta)          # contract GEMM (nx.gemm_i8)
         toks = g.generate(prompt, N_NEW)
         ref["bundles"][name] = {"file": f"{name}.npz", "sha256": sha(path), "tokens": toks,
+                                "sat_count": {k: v for k, v in g.sat_count.items() if v},
                                 "text": "".join(chars[t] for t in toks)}
         print(name, repr(ref["bundles"][name]["text"]))
     (TINY / "golden_ref.json").write_text(json.dumps(ref, indent=1))

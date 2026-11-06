@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--max-minutes", type=float, default=1e9)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--save-every", type=int, default=0, help="also write <out>_last.pt every N iters")
+    ap.add_argument("--resume", default=None, help="checkpoint to resume weights (+ optimizer if saved) from")
     args = ap.parse_args()
 
     torch.set_num_threads(args.threads)
@@ -49,12 +51,25 @@ def main():
     cfg = CONFIGS[args.model]
     model = GPT(cfg)
     T = cfg.block_size
+    start = 0
+    ck = None
+    if args.resume:
+        from nanoxl.model_fp import load_nanogpt_state_dict
+        ck = torch.load(args.resume, map_location="cpu", weights_only=False)
+        load_nanogpt_state_dict(model, ck["model"])
+        start = int(ck["iter"]) + 1
+        rng = np.random.default_rng(args.seed + start)   # fresh batch stream after resume
+        print(f"resumed from {args.resume} at iter {start}", flush=True)
 
     decay = [p for n, p in model.named_parameters() if p.dim() >= 2]
     nodecay = [p for n, p in model.named_parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": 0.1},
                              {"params": nodecay, "weight_decay": 0.0}],
                             lr=args.lr, betas=(0.9, 0.99))
+    opt_path = Path(args.out).with_suffix(".opt.pt")
+    if ck is not None and Path(args.resume).with_suffix(".opt.pt").exists():
+        opt.load_state_dict(torch.load(Path(args.resume).with_suffix(".opt.pt"), weights_only=False))
+        print("optimizer state restored", flush=True)
 
     def lr_at(it):
         if it < args.warmup:
@@ -85,10 +100,12 @@ def main():
 
     t0 = time.time()
     best = (float("inf"), -1)
-    log = []
+    log = list(ck.get("log", [])) if ck is not None else []
+    if ck is not None:
+        best = (float(ck["val_est"]), start - 1)
     model.train()
     it = 0
-    for it in range(args.iters + 1):
+    for it in range(start, args.iters + 1):
         stop = (time.time() - t0) / 60 > args.max_minutes
         if it % args.eval_every == 0 or it == args.iters or stop:
             vl = est_val()
@@ -98,10 +115,16 @@ def main():
                 best = (vl, it)
                 save_checkpoint(args.out, model, {"iter": it, "val_est": vl, "args": vars(args),
                                                   "chars": chars, "log": log})
+                torch.save(opt.state_dict(), opt_path)
         if stop or it == args.iters:
             break
         for g in opt.param_groups:
             g["lr"] = lr_at(it)
+        if args.save_every and it > start and it % args.save_every == 0:
+            lp = Path(args.out).with_name(Path(args.out).stem + "_last.pt")
+            save_checkpoint(lp, model, {"iter": it - 1, "val_est": best[0], "args": vars(args),
+                                        "chars": chars, "log": log})
+            torch.save(opt.state_dict(), lp.with_suffix(".opt.pt"))
         x, y = batch(train, args.batch)
         _, loss = model(x, y)
         opt.zero_grad(set_to_none=True)

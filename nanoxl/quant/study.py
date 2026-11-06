@@ -186,6 +186,7 @@ def main():
     ap.add_argument("--variants", default=",".join(VARIANTS))
     ap.add_argument("--gen", type=int, default=200)
     ap.add_argument("--prompts", type=int, default=3)
+    ap.add_argument("--merge", action="store_true", help="keep variants already in --out (same windows)")
     ap.add_argument("--render", action="store_true", help="print markdown for an existing --out JSON")
     args = ap.parse_args()
     if args.render:
@@ -226,7 +227,13 @@ def main():
     res["fp32_gen"] = ["".join(chars[t] for t in g) for g in fp_gen]
 
     res["variants"] = {}
+    if args.merge and Path(args.out).exists():           # resume: keep variants already measured
+        old = json.loads(Path(args.out).read_text())
+        if old.get("eval_windows") == len(wins):
+            res["variants"] = old["variants"]
     for name in args.variants.split(","):
+        if name in res["variants"]:
+            continue
         qc = QuantConfig(**VARIANTS[name])
         tq = time.time()
         A, meta = build_bundle(W, mcfg, cal, qc)

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from simrun import run
@@ -19,7 +21,10 @@ def test_array_ctrl(n):
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(os.environ.get("SIM", "icarus") != "verilator",
+                    reason="N=32 (1024 PEs) is impractically slow on Icarus; Verilator only")
 def test_array_ctrl_kv260_size():
-    """Default KV260 configuration N=32 with a deeper accumulator; longer random run."""
+    """Default KV260 configuration N=32 with a deeper accumulator; longer random run
+    (all controller tests, ~2 min on Verilator)."""
     run("array_ctrl", CTRL, "array_ctrl_cocotb", parameters={"N": 32, "M_DEPTH": 256},
         extra_env={"ARR_N": "32", "ARR_MDEPTH": "256", "ARR_NJOBS": "60"})

@@ -138,7 +138,7 @@ constructs: none; the `hazard_seen`/`overflow` checkers sit under `ifndef SYNTHE
 | `array_*` (N=4, 8) | random tiles with ragged K and input bubbles, exact latency 2N-1; -128×-128 over full K; INT4 with every code; overlap load; exact-limit reuse/chase; checker sanity ×2; reset mid-stream |
 | `ctrl_*` (N=4, 8, 16) | 40 random GEMMs (M up to 64, K up to 3N ⇒ multi-tile accumulation, ragged n, 30 % INT4, random accumulator base with wrap, garbage in masked lanes, random bubbles on cmd/w/a, 50 % random backpressure); INT4 with full/ragged/odd n; -128×-128 over K = 4N; long `out_ready=0` stall; M=1/K=1 accumulate chains (bypass); reset mid-stream; streaming performance |
 | `scratchpad_*` | random R/W at RD_LAT 1/2; FIFO random push/pop, count, throughput |
-| slow tier | `test_array_ctrl_kv260_size`: N=32, M_DEPTH=256, 60 random GEMMs |
+| slow tier | `test_array_ctrl_kv260_size`: N=32, M_DEPTH=256, all controller tests with 60 random GEMMs (Verilator only; Icarus is impractically slow at 1024 PEs) |
 
 Every controller test ends by asserting `hazard_seen == 0`, `overflow_seen == 0`, `idle == 1`
 and that every expected row arrived in order with the right `last` flag.

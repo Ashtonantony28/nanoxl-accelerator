@@ -467,9 +467,9 @@ async def ctrl_irq_and_csr(dut):
     assert await tb.rd("RING_SIZE") == 0x22
     await tb.wr("RING_SIZE", tb.ring_size)
     assert await tb.rd(0x7F0) == 0 and await tb.rd(0x0F0) == 0
-    tb.bench.set("sat_cnt", sum(v << (32 * i) for i, v in enumerate([5, 0xFFFFFFFF, 123456, 7])))
+    tb.bench.set("sat_cnt", sum(v << (32 * i) for i, v in enumerate([5, 0xFFFFFFFF, 123456, 7, 0xA5A5])))
     await tb.cycles(3)
-    assert [await tb.rd(REG["SAT0"] + 4 * i) for i in range(4)] == [5, 0xFFFFFFFF, 123456, 7]
+    assert [await tb.rd(REG["SAT0"] + 4 * i) for i in range(5)] == [5, 0xFFFFFFFF, 123456, 7, 0xA5A5]
     await tb.wr("IRQ_EN", 0)
     await tb.submit([isa.C("IRQ", code=0xBEEF), isa.C("END")])
     await tb.wait_idle(ends=1)

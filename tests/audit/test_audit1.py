@@ -46,10 +46,8 @@ def _vec_seq_sat_order():
     return [_RTL2NAME[s.strip()] for s in m.group(1).split(",")][::-1]   # concatenation is MSB first
 
 
-@pytest.mark.xfail(strict=True, reason="A1-02: driver SAT_i names / SimBackend slots (ln_z at 2, ln_out at 3, "
-                                       "score folded into requant, NSAT=4) disagree with vec_seq.sat_cnt "
-                                       "{requant, alu, ln_out, ln_z, score} and its NSAT=5 wiring note")
 def test_a1_02_sat_csr_map_matches_rtl():
+    """A1-02 fixed (SG7c): one canonical SAT map, vec_seq.sat_cnt order, NSAT = 5 in RTL and driver."""
     rtl = _vec_seq_sat_order()
     assert rtl == ["requant", "alu", "ln_out", "ln_z", "score"]          # what the RTL drives (sanity)
     nsat_top = int(re.search(r"parameter int NSAT\s*=\s*(\d+)", (ROOT / "rtl/ctrl_top.sv").read_text()).group(1))
@@ -57,12 +55,15 @@ def test_a1_02_sat_csr_map_matches_rtl():
     assert list(R.SAT_NAMES) == rtl
 
 
-def test_a1_02_simbackend_slot_assignment_is_as_audited():
-    """Pins what the SimBackend does today (the audited behaviour behind A1-02): an LN that clamps in
-    the normalize step charges SAT_2, the slot the RTL uses for LN *out*."""
+def test_a1_02_simbackend_slots_follow_rtl():
+    """A1-02 fixed (SG7c): the SimBackend charges each clamp to the slot vec_seq.sat_cnt uses (LN normalize
+    clamp -> SAT_3 ln_z, LN output clamp -> SAT_2 ln_out, softmax score -> SAT_4), and nanoxl_top wires
+    vec_seq.sat_cnt to ctrl_top unchanged."""
     src = (ROOT / "nanoxl/driver/backends.py").read_text()
-    assert '"SOFTMAX_ONLINE": 0' in src and "self.sat[2] = _sat32(self.sat[2] + dz)" in src
-    assert R.SAT_NAMES[2] == "ln_z"
+    assert '"SOFTMAX_ONLINE": 4' in src and "self.sat[3] = _sat32(self.sat[3] + dz)" in src
+    assert R.SAT_NAMES[2] == "ln_out" and R.SAT_NAMES[3] == "ln_z" and R.SAT_NAMES[4] == "score"
+    top = (ROOT / "rtl/nanoxl_top.sv").read_text()
+    assert re.search(r"assign sat_cnt\s*=\s*vec_sat;", top) and ".NSAT(NSAT)" in top
 
 
 # ----------------------------------------------------------------------------- A1-01

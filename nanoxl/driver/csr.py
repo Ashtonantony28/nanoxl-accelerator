@@ -31,8 +31,9 @@ PERF_RETIRED = 0x074
 PERF_BYTES_LO = 0x078
 PERF_BYTES_HI = 0x07C
 SAT_BASE = 0x080             # SAT_i at 0x080 + 4 i, i < NSAT
-NSAT = 4
-SAT_NAMES = ("requant", "alu", "ln_z", "ln_out")
+NSAT = 5
+# canonical order = rtl/vec_seq.sv sat_cnt (AUDIT-1 A1-02; docs/control.md §5)
+SAT_NAMES = ("requant", "alu", "ln_out", "ln_z", "score")
 
 CTRL_STEP = 1 << 0
 CTRL_SOFT_RESET = 1 << 1

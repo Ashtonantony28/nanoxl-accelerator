@@ -61,6 +61,14 @@ Each buffer is `NB` banks of 128-bit lines, **line-interleaved**: line *l* is ba
 (*l* mod LINES)/NB. A bank is a simple-dual-port RAM (one read, one byte-strobed write per cycle,
 registered read), so BRAM/URAM inference is direct.
 
+`nanoxl_top` parameters (SG11b): `NB` is the default bank count of every buffer and `ABUF_NB`, `WBUF_NB`,
+`ACC_NB`, `PBUF_NB`, `KV_NB` override it per buffer (0 = `NB`; each must still be ≥ the widest port).
+`RAM_STYLE` picks the bank primitive explicitly through `spad_bank`'s `RAM_STYLE` (a `ram_style`
+attribute that Vivado and Yosys honour, so no XDC pattern is needed): 0 = tool's choice, 1 = block RAM
+everywhere (PYNQ-Z2), 2 = URAM288 for banks of ≥ 2048 lines and block RAM below (KV260: ABUF, ACC, KVBUF in
+URAM). `OREG` = 1 adds the bank output register (URAM OREG / RAMB DOB_REG) on every buffer: read latency 2
+on every port, the null buffer included.
+
 Ports (all with the DMA's line protocol: buffer id, 17-bit line address, in-order responses, no
 response backpressure):
 
@@ -92,14 +100,27 @@ response backpressure):
 * **Arbitration.** Per buffer and cycle, reads and writes separately: ports are visited in a rotating
   order (start advances every cycle); a request is granted when none of its banks was taken by an
   earlier port in that order. `ready` = grant (combinational on `valid`; no requester makes `valid`
-  depend on `ready`). A request therefore waits fewer than 7 (read) / 3 (write) cycles behind
-  conflicts; the bench asserts this bound.
-* **Latency / ordering.** Reads return exactly one cycle after the grant, so responses are in request
-  order per port and the requesters' credit counters (≤ 8 / 16 in flight) never overflow.
+  depend on `ready`). A request therefore waits fewer than 8 (read) / 4 (write) cycles behind
+  conflicts; the bench asserts this bound (and a mutation that freezes the rotation fails it).
+  Implementation (docs/fpga.md C2): the bank set of a port is its constant line mask rotated by the start
+  bank; pairwise conflicts are computed once; each of the NR (NW) rotations is a static priority chain
+  over them, and the rotation counter selects one grant vector. Per bank the owner is one-hot, so bank
+  address / data / strobes are AND-OR muxes; a write port's lines are barrel-rotated onto the banks and a
+  read port's bank outputs barrel-rotated back. No index into the router depends on a run-time value
+  (the previous `(rr + k) % NR` loop gave Yosys 32-bit multipliers and shifters).
+* **Latency / ordering.** Reads return exactly 1 + `OREG` cycles after the grant, so responses are in
+  request order per port and the requesters' credit counters (≤ 8 / 16 in flight) never overflow. All
+  requesters count in-flight beats against their buffer space, so latency 2 needs no change in them
+  (`test_top_smoke_oreg`, `test_top_tiny_oreg`); it costs cycles only where a requester waits for read
+  data before its next request (the array's ACC read-modify-write and the DMA's store path), measured
+  below.
 * **Visibility.** A write granted at edge *t* is visible to every read granted at an edge > *t*, on
   any port and any port width (array ACC N/4-line beats vs VEC 1-line reads hit the same banks); a
   read granted at the same edge returns the old line. This is the rule array_seq's ACC RMW
-  (array.md §7), vec_seq's in-place ops and the semaphore protocol rely on.
+  (array.md §7), vec_seq's in-place ops and the semaphore protocol rely on. It holds unchanged with
+  `OREG` = 1: the bank array is read at the grant edge and the output register only delays the line,
+  so a write granted one cycle after the read cannot reach it (the buf_spad bench checks both
+  latencies against a model that samples the line at the grant).
 
 ## 4. Integration checklist (`integration-notes-for-sg7c.md`, AUDIT-1 §5)
 

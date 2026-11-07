@@ -132,16 +132,32 @@ module vec_seq_rd #(
     assign f_pop      = can_fill && f_valid;
     assign k_eff      = consume ? 8'd0 : k;
 
-    // lanes of the slice `sub` of the assembly buffer, by element size
-    logic [L*32-1:0] slice;
+    // lanes of the slice `sub` of the assembly buffer, by element size (docs/fpga.md C9): slice
+    // `sub` starts at byte sub * L * 2^ebl, i.e. at unit u = sub << ebl of L bytes, and only
+    // narrow beats (L * 2^ebl < 16P bytes) have sub > 0, so u < NU = 16P / L. One barrel shift
+    // of the buffer by u units (log2(NU) fixed stages), then lane j is byte / halfword / word j.
+    localparam int NU = (16 * P > L) ? (16 * P) / L : 1;
+    localparam int UW = (NU > 1) ? $clog2(NU) : 1;
+    function automatic logic [AL*RW-1:0] shr_units(input logic [AL*RW-1:0] v, input logic [UW-1:0] u);
+        logic [AL*RW-1:0] x;
+        x = v;
+        for (int i = 0; i < $clog2(NU); i++)
+            if (u[i]) x = x >> ((1 << i) * L * 8);
+        shr_units = x;
+    endfunction
+    logic [UW-1:0]    su;
+    logic [AL*RW-1:0] asm_s;
+    logic [L*32-1:0]  slice;
+    /* verilator lint_off WIDTHTRUNC */
+    assign su    = UW'({9'd0, sub} << ebl);
+    /* verilator lint_on WIDTHTRUNC */
+    assign asm_s = shr_units(asm_b, su);
     always_comb begin
         for (int j = 0; j < L; j++) begin
-            int e;
-            e = (int'(sub) << LL) + j;
             case (ebl)
-                2'd0:    slice[j*32 +: 32] = 32'($signed(asm_b[(e % AE)*8 +: 8]));
-                2'd1:    slice[j*32 +: 32] = 32'($signed(asm_b[(e % (AE/2))*16 +: 16]));
-                default: slice[j*32 +: 32] = asm_b[(e % (AE/4))*32 +: 32];
+                2'd0:    slice[j*32 +: 32] = 32'($signed(asm_s[j*8 +: 8]));
+                2'd1:    slice[j*32 +: 32] = 32'($signed(asm_s[j*16 +: 16]));
+                default: slice[j*32 +: 32] = asm_s[j*32 +: 32];
             endcase
         end
     end
@@ -190,11 +206,10 @@ module vec_seq_rd #(
                 end
             end
             if (f_pop) begin
-                if (k_eff == 8'd0) begin
-                    asm_b <= '0;
-                    asm_b[RW-1:0] <= f_data;
-                end else begin
-                    asm_b[int'(k_eff)*RW +: RW] <= f_data;
+                // chunk k_eff of the buffer; the first chunk of a group clears the others
+                for (int c = 0; c < AL; c++) begin
+                    if (k_eff == 8'(c))       asm_b[c*RW +: RW] <= f_data;
+                    else if (k_eff == 8'd0)   asm_b[c*RW +: RW] <= '0;
                 end
                 k          <= k_eff + 8'd1;
                 full       <= (k_eff + 8'd1 == 8'(1 << lpb_l2)) || (lines_left == 14'd1);

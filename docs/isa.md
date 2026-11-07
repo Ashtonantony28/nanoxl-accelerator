@@ -1,6 +1,7 @@
 # NanoXL command ISA and DDR image format (contract C4)
 
-Status: M1 draft, owned by SG4. Executable form: `nanoxl/isa.py` (encoder/decoder, validation),
+Status: M1, owned by SG4; C5 lowering, W4A8 group scales, SFU tables and the alignment rule added
+by SG4b (ADR-004, additive: new opcodes `GEMM_GS` 0x12 and `LUT_LOAD` 0x1E, existing encodings unchanged). Executable form: `nanoxl/isa.py` (encoder/decoder, validation),
 `nanoxl/funcsim.py` (semantics), `nanoxl/cyclemodel.py` (timing). Tests: `tests/py/test_isa.py`.
 The field tables at the end of this file are generated from `nanoxl.isa.LAYOUTS` by
 `isa.markdown_tables()`; a test fails if they drift.
@@ -52,11 +53,20 @@ The field tables at the end of this file are generated from `nanoxl.isa.LAYOUTS`
   buffer for an operand (e.g. GEMM's A operand is always ABUF) carries just the address.
 * All scratchpad **row strides are in units of 16-byte lines** (`isa.LINE`); a stride of 0 in
   `DMA_*.sp_stride` means "rows packed back to back" (stride = row_bytes). The compiler pads tensor
-  row strides to 16 bytes. Base addresses may be byte-granular (column offsets of tiles); wave-2
-  RTL may require 16-byte alignment of bases, which the compiler already gives for every tensor
-  base and every tile column offset that is a multiple of 16 bytes.
+  row strides to 16 bytes.
+* **Alignment rule.** Every **base address** in a command, scratchpad or DDR (all `*_addr` fields,
+  `isa.ALIGNED_FIELDS`), is a multiple of 16 bytes, so the RTL may treat the low 4 bits as zero and
+  address scratchpads in lines. Element counts, `row_bytes`, `len` and `DMA.ddr_stride` stay
+  byte-granular (a DMA engine realigns rows inside a burst). Enforcement: `isa.check_aligned` /
+  `isa.encode(cmd, aligned=True)`; the compiler checks every command it emits (`SyncBuilder.emit`),
+  `Program.ring_bytes()` encodes with `aligned=True`, and `FuncSim` rejects unaligned commands by
+  default. The allocators round every allocation to a line; weight panels are split at multiples of
+  lcm(N_array, 16) along K and N, so every tile column offset (GEMM A operand, REQUANT destination)
+  is line aligned; `d_model` and `d_head` must be multiples of 16 (per-head column offsets, KV rows).
+  The command *bit format* still carries the low address bits (the golden decoder vectors exercise
+  full field ranges); a command that breaks the rule has undefined behaviour on hardware.
 * DDR addresses are 32-bit physical (PL view). `compiler.relocate()` rebases a stream when the
-  driver's CMA buffer lands somewhere else.
+  driver's CMA buffer lands somewhere else (the shift must keep 16-byte alignment).
 
 ### Tensor layouts
 * Activations `[M, width]` row-major with a padded row stride. Weights in WBUF: a panel
@@ -65,26 +75,37 @@ The field tables at the end of this file are generated from `nanoxl.isa.LAYOUTS`
   cache). Accumulator tiles `[M, N]` int32 with `c_stride`.
 * KV cache: `[slot][layer][K|V][head][pos][d_head]` int8, both on chip and in DDR, so one head's K
   for all positions is one contiguous burst.
-* PBUF records: requant record = 16 bytes `{int32 bias, int32 mult, int32 shift, pad}` per output
-  channel (`REQUANT.per_tensor=1` reads only record 0). LN block = `float32 {in_scale, out_scale,
-  eps, 0}` then `gamma[cols]`, `beta[cols]` (float32 **placeholder**, replaced when ADR-002 freezes
-  C5). Softmax ctx = 16 bytes (`float32 scale`, placeholder) followed by 16 bytes of running
-  state per row for multi-tile online softmax (SG5/SG8). GELU LUT = 256 int8 indexed by the
-  input byte `uint8(x)`.
+* PBUF blocks (all little-endian, line aligned):
+  * **requant record**, 16 bytes per output channel: `int32 {bias, mult, shift, ls}`. `ls` is the exact
+    left pre-shift of the score requant (`x = wrap32((acc << ls) + bias)`, C5 `score.ls`); it must be 0 in
+    REQUANT records (funcsim rejects non-zero). `REQUANT.per_tensor=1` reads only record 0.
+  * **LN block** (`funcsim.ln_block`): 32-byte header `int32 mu_mult, mu_shift, sqrt_d, sh; int64 eps_q;
+    8 zero bytes`, then `g int16[cols]` padded to a line, then `b int32[cols]` (C5 LN constants from the
+    bundle's `.c`, `.g`, `.b`). Size `32 + rup(2 cols, 16) + 4 cols`.
+  * **softmax ctx** = the layer's score requant record (16 bytes; bias 0, `ls` = `score.ls`). The
+    attention parameter block is `[score record][PV record]`.
+  * **GELU LUT** = 256 int8 indexed by the input byte `uint8(x)` (`h{l}.gelu.lut`).
+  * **SFU tables** block: `lut.exp2`, `lut.recip`, `lut.rsqrt`, each 256 uint16 (512 bytes), loaded into
+    the SFU's table RAMs by `LUT_LOAD` (table 0, 1, 2) in every program's prologue.
+* **GEMM_GS operand** in WBUF (`isa.gs_layout`): packed int4 `W[K, N/2]` (C1b) at `w_addr`, then the
+  group multipliers `gm uint8[ceil(K/G), N]` at `w_addr + rup(K N/2, 16)`, G = `2^(glog2+3)`. W4A8 DDR
+  panels are stored in exactly this layout, so one dense DMA brings weights and scales in together.
 
 ## 4. Command semantics
 
 | op | queue | semantics |
 |---|---|---|
 | DMA_LOAD / DMA_STORE | DMA | Move `rows x row_bytes` between DDR (`ddr_stride` bytes per row; 0 = dense) and scratchpad `sp_buf` (`sp_stride` lines; 0 = dense). `chan` is an AXI-port hint: 0 weights/params, 1 activations, 2 KV. A load after a store to overlapping DDR in the DMA queue observes the store. |
-| GEMM | ARRAY | `C[M,N] (+)= A[M,K] @ W[K,N]` exact int32 (C1/C1b). A from ABUF (`a_stride` lines); W from WBUF or KVBUF (`w_buf`), dense; C in ACC (`c_stride` lines). `accumulate=0` overwrites, `1` adds (int32 wraparound; cannot overflow for total K <= 4096). The array walks N/n x K/n tiles internally. `gemv=1` selects the low-latency path that skips skew/deskew (a timing hint; results are identical). `int4=1`: W is C1b-packed, N even. `w_trans=1`: W stored `[N,K]`. |
-| REQUANT | VEC | `dst[M,N] = requant(src[M,N], records)` per C2, int8 or int16 (`out16`). Per-channel records start at `param_addr`; tile column offset n0 is `param_addr + 16 n0`. |
-| VEC | VEC | Elementwise over `len` contiguous elements: COPY, ADD, SUB, MUL, MAX, MIN, ADDI (src0+imm), SHRR (C2 round-half-away right shift by imm), SHL. Computed exactly, saturated to `dt_out`. |
-| LN | VEC | Row-wise LayerNorm of `[rows, cols]` int8/int16 (`in16`) to int8. **Float placeholder** until C5. |
-| SOFTMAX_ONLINE | VEC | Row-wise softmax of int32 scores to int8 probabilities. `causal`: row i may see column j iff `j <= i + diag`. `first/last` delimit a multi-tile online pass (running max/sum in ctx). **Float placeholder**, single tile only, until C5/SG5. |
+| GEMM | ARRAY | `C[M,N] (+)= A[M,K] @ W[K,N]` exact int32 (C1/C1b). A from ABUF (`a_stride` lines); W from WBUF or KVBUF (`w_buf`), dense; C in ACC (`c_stride` lines). `accumulate=0` overwrites, `1` adds (int32 wraparound; cannot overflow for total K <= 4096). The array walks N/n x K/n tiles internally. `gemv=1` selects the low-latency path that skips skew/deskew (a timing hint; results are identical). `int4=1`: W is C1b-packed, N even, no group scales. `w_trans=1`: W stored `[N,K]`. |
+| GEMM_GS | ARRAY | W4A8 GEMM with group scales (ADR-004): `C[M,N] (+)= sum_g gm[g,n] * (A[:, gG:(g+1)G] @ W4[gG:(g+1)G, :])`, exact int32 (C5 W4A8 linear, `acc = sum_g gm[g,n] acc_g`). Operand block layout in §3; the last group may be ragged. The array controller splits K-tiles at group boundaries and multiplies each tile's partial row by its uint8 `gm` row in the accumulator read-modify-write. N even. Fields as GEMM (no `int4`, `w_trans`, `w_buf`: always WBUF) plus `glog2`. |
+| ATTN_TILE | ARRAY | Reserved for SG8: fused flash-decoding tile. Encoded and costed, not executed by funcsim (C5 defines softmax as a full-row 3-pass; an online variant needs a new ADR). |
+| REQUANT | VEC | `dst[M,N] = requant(src[M,N], records)` per C2, int8 or int16 (`out16`). Per-channel records start at `param_addr`; tile column offset n0 is `param_addr + 16 n0`. Saturation events are counted. |
+| VEC | VEC | Elementwise over `len` contiguous elements: COPY, ADD, SUB, MUL, MAX, MIN, ADDI (src0+imm), SHRR (C2 round-half-away right shift by imm), SHL. Computed exactly, saturated to `dt_out` (counted; the INT16 residual add is `ADD` i16 -> i16). |
+| LN | VEC | Row-wise C5 LayerNorm of `[rows, cols]` int16 (`in16=1`; int8 is sign-extended) to int8 with the LN block at `param_addr` and the rsqrt table: `S = sum x; mu = rdivpot(srdhm(S, mu_mult), mu_shift); c = x - mu; Q = sum c^2 + eps_q; (y, k) = RSQRT(Q); z = sat16(rshr(c y sqrt_d, 22 + k)); out = sat8(rdivpot(z g + b, sh))` (`ops.ln_norm_i` / `ln_affine_i`). Both clamps are counted. |
+| SOFTMAX_ONLINE | VEC | Row-wise: `s = requant16(src int32 scores in ACC; ctx record incl. ls)` (counted), then the C5 full-row 3-pass SOFTMAX with the exp2 / recip tables over the kept columns, `P int8 [0,127]` to ABUF, masked columns 0. `causal`: row i keeps column j iff `j <= i + diag`; otherwise all columns. `first = last = 1` is required (multi-tile online softmax is not C5). |
 | GELU | VEC | `dst[i] = lut[uint8(src[i])]` over `len` bytes. Exact. |
 | KV_APPEND | VEC | For `t < rows`, `h < heads`: copy `src[t, h*dh : (h+1)*dh]` to `dst + (h*ctx + pos + t)*dh`. |
-| ATTN_TILE | ARRAY | Reserved for SG8: fused flash-decoding tile (QK^T, online softmax, PV) over `len` keys. Encoded and costed, not yet executed by funcsim. |
+| LUT_LOAD | VEC | Copy 256 uint16 from PBUF `src_addr` into SFU table `table` (0 exp2, 1 recip, 2 rsqrt; 3 reserved). LN and SOFTMAX_ONLINE read these tables; using one before it was loaded is an error. Same queue as its readers, so no semaphore is needed. |
 | WAIT / SIGNAL | named | Semaphores, see section 2. |
 | IRQ / END | CTRL | Barrier + interrupt / end of program. |
 
@@ -109,6 +130,7 @@ Sized for `shakespeare` (d=384, ctx=256, 6 layers, d_ff=1536) and for the top of
 | KV heads (m1) / dh (m1) | 6 / 8 | 64 / 256 | 8 heads, dh 64 |
 | SOFTMAX diag (s) | 13 | +-4096 | query offset up to ctx |
 | semaphores | 5 | 32 | 6 used |
+| GEMM_GS glog2 | 3 | group 8..1024 | 64 (ADR-002) |
 
 Growing past these (e.g. GPT-2 124M from DDR, d=768, d_ff=3072, vocab 50257) needs the compiler
 to tile the LM head along N (already supported: panels are <= 4092 columns) and nothing else.
@@ -120,13 +142,24 @@ Built once per (model, hardware config) by `compiler.Compiler`; regions are 4 Ki
 | region | contents |
 |---|---|
 | `cmd_ring` | command words (default 4 MiB; the host writes each step's program here) |
-| `params` | requant records, LN blocks, softmax ctx + PV record per attention layer, GELU LUTs |
-| `weights` | GEMM weights **pre-tiled into panels** `[kc, nt]` (dense, int8 or packed int4) in the order the compiler streams them, so each panel is one contiguous burst |
+| `params` | SFU tables, requant records, LN blocks, score + PV records per attention layer, GELU LUTs (§3 layouts) |
+| `weights` | GEMM weights **pre-tiled into panels** `[kc, nt]` (dense int8, or the GEMM_GS block: packed int4 + group scales) in the order the compiler streams them, so each panel is one contiguous burst |
 | `kv` | DDR-KV mode only: `[slot][layer][K/V][head][ctx][dh]` |
-| `io_<tensor>` | inputs (host-side embedding rows, int16 residual) and outputs (int32 logits) |
+| `io_<tensor>` | inputs (host-side embedding rows, int16 residual) and outputs (int16 logits, C5) |
 
-The host does the embedding lookup (`x0 = wte[tok] + wpe[pos]`, a few hundred bytes per token) and
-the sampling/argmax in v1.
+The host does the embedding lookup (`x0 = sat16(emb.tok[t] + emb.pos[p])`, a few hundred bytes per
+token, its saturations counted as `resid`) and the greedy argmax (ties -> lowest index) in v1;
+`funcsim.HostRunner` is the executable model of that driver.
+
+## 6b. Saturation counters
+
+Every clamp of C5 is countable. Hardware keeps sticky counters per unit (requant, ALU, LN z, LN out);
+the funcsim counts per command under the compiler's annotation (`Cmd.note`, not encoded), which is the
+golden model's counter name: the linear name for REQUANT, `h{l}.score` for SOFTMAX_ONLINE's score
+requant, `h{l}.pv` for the PV REQUANT, `resid` for the residual VEC ADDs (and the host embedding),
+the LN name for LN's output clamp and `ln_z` for its normalize clamp. Scores are computed and
+requantized over all keys `0..pos+n-1` of a step (as the golden model does), so the score counter
+also sees the causally masked entries of a prefill chunk.
 
 ## 7. Field tables (generated)
 
@@ -309,6 +342,31 @@ the sampling/argmax in v1.
 | rows | [96:85] | m1 |
 | src_stride | [108:97] | u |
 
+#### GEMM_GS (opcode 0x12, queue ARRAY)
+
+| field | bits | kind |
+|---|---|---|
+| opcode | [5:0] | u |
+| gemv | [6:6] | u |
+| accumulate | [7:7] | u |
+| a_addr | [27:8] | u |
+| w_addr | [48:28] | u |
+| c_addr | [68:49] | u |
+| M | [80:69] | m1 |
+| N | [92:81] | m1 |
+| K | [104:93] | m1 |
+| a_stride | [114:105] | u |
+| c_stride | [124:115] | u |
+| glog2 | [127:125] | u |
+
+#### LUT_LOAD (opcode 0x1e, queue VEC)
+
+| field | bits | kind |
+|---|---|---|
+| opcode | [5:0] | u |
+| table | [7:6] | u |
+| src_addr | [27:8] | u |
+
 ## 8. Golden vectors
 
 Bytes in memory order (byte 0 first). The RTL command decoder must decode each to the fields shown.
@@ -330,3 +388,6 @@ Bytes in memory order (byte 0 first). The RTL command decoder must decode each t
 | `GELU(src_addr=4096, dst_addr=4096, lut_addr=32512, len=1536)` | `1c0004004000c01ffc17000000000000` |
 | `KV_APPEND(src_addr=16384, dst_addr=73728, pos=255, heads=6, dh=64, ctx=256, rows=1, src_stride=72)` | `1d00100080847f287efe010090000000` |
 | `ATTN_TILE(first=1, last=0, q_addr=1, k_addr=2, v_addr=3, o_addr=4, ctx_addr=5, rows=64, len=4096)` | `51010020000006000001001400c0ffff` |
+| `GEMM_GS(gemv=1, accumulate=0, a_addr=4096, w_addr=65536, c_addr=8192, M=1, N=480, K=128, a_stride=8, c_stride=120, glog2=3)` | `52001000001000400000bee30f10c063` |
+| `GEMM_GS(gemv=0, accumulate=1, a_addr=1048560, w_addr=2097136, c_addr=1048560, M=4096, N=4096, K=4096, a_stride=1023, c_stride=1023, glog2=7)` | `92f0ff0fffffe1ffffffffffffffffff` |
+| `LUT_LOAD(table=2, src_addr=1536)` | `9e000600000000000000000000000000` |

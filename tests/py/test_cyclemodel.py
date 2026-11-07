@@ -96,3 +96,46 @@ def test_cyclemodel_pynq_and_tiny():
     t = estimate(TINY, KV260)
     assert t["decode_tok_s"] > 5 * estimate(SHAKESPEARE, KV260, prefill_len=0)["decode_tok_s"]
     assert t["prefill_ms"] < 2
+
+
+def test_cyclemodel_gemm_gs_cost():
+    """ADR-004: a W4A8 group-scaled GEMM costs one extra scale beat on the first K-tile of each group;
+    it only shows when the tile is weight-load bound (GEMV), never in prefill."""
+    hw = KV260  # N = 32, 2 weight rows per cycle -> int4 tile preload 8 cycles, with scale beat 9
+    gs = C("GEMM_GS", M=1, N=64, K=128, glog2=3, gemv=1)
+    g4 = C("GEMM", M=1, N=64, K=128, int4=1, gemv=1)
+    occ_gs, lat, info = cost(gs, hw)
+    occ_4, lat4, _ = cost(g4, hw)
+    assert occ_4 == 8 + 2 * 4 * 8
+    assert occ_gs == 8 + 2 * (2 * 9 + 2 * 8) and lat == lat4 and info["macs"] == 64 * 128
+    big_gs, _, _ = cost(C("GEMM_GS", M=256, N=64, K=128, glog2=3), hw)
+    big_4, _, _ = cost(C("GEMM", M=256, N=64, K=128, int4=1), hw)
+    assert big_gs == big_4                      # array-bound: the scale beat hides under M
+    # group 16 < N: the controller splits K-tiles at group boundaries (8 tiles per column block)
+    occ16, _, _ = cost(C("GEMM_GS", M=1, N=32, K=128, glog2=1, gemv=1), hw)
+    assert occ16 == 8 + 8 * 9
+
+
+def test_cyclemodel_c5_sfu_costs():
+    hw = KV260  # 64 lanes
+    occ, _, _ = cost(C("LN", rows=4, cols=384), hw)
+    assert occ == 4 * (3 * 6 + hw.sfu_row_bubble) + hw.row_latency_ln
+    occ, _, _ = cost(C("SOFTMAX_ONLINE", rows=2, cols=100, first=1, last=1), hw)
+    assert occ == 2 * (3 * 2 + hw.sfu_row_bubble) + hw.row_latency_softmax
+    assert cost(C("LUT_LOAD", table=1), hw)[0] == 16
+
+
+def test_cyclemodel_runs_real_bundle_programs():
+    """The cycle model times compiled programs of the real tiny bundles (every opcode they use is costed)."""
+    from pathlib import Path
+    from nanoxl.compiler import Compiler
+    from nanoxl.export import load_bundle
+    from nanoxl.graph import from_bundle
+    root = Path(__file__).resolve().parents[2] / "artifacts" / "models" / "tiny"
+    for name in ("w8a8", "w4a8"):
+        g, p = from_bundle(*load_bundle(root / f"{name}.npz"))
+        comp = Compiler(g, p, KV260)
+        dec = simulate(comp.compile_step([(64, 1)]).cmds, KV260)
+        pre = simulate(comp.compile_step([(0, 64)]).cmds, KV260)
+        assert 0 < dec.cycles < pre.cycles
+        assert dec.ddr_bytes >= g.cfg.weight_bytes

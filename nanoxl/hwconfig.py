@@ -32,6 +32,7 @@ class HwConfig:
     vec_latency: int = 8            # pipeline latency of vector ops
     row_latency_ln: int = 24        # per-row reduction + rsqrt latency
     row_latency_softmax: int = 24   # per-row max/sum reduction + reciprocal latency
+    sfu_row_bubble: int = 4         # per-row stall between LN / softmax passes not hidden by row interleaving (estimate)
 
     def with_(self, **kw) -> "HwConfig":
         return replace(self, **kw)

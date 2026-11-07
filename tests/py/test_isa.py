@@ -38,6 +38,12 @@ GOLDEN = [
      "1d00100080847f287efe010090000000"),
     (C("ATTN_TILE", first=1, last=0, q_addr=1, k_addr=2, v_addr=3, o_addr=4, ctx_addr=5, rows=64, len=4096),
      "51010020000006000001001400c0ffff"),
+    # ADR-004 additions (new opcodes; the vectors above are unchanged)
+    (C("GEMM_GS", gemv=1, accumulate=0, a_addr=4096, w_addr=65536, c_addr=8192, M=1, N=480, K=128,
+       a_stride=8, c_stride=120, glog2=3), "52001000001000400000bee30f10c063"),
+    (C("GEMM_GS", gemv=0, accumulate=1, a_addr=(1 << 20) - 16, w_addr=(1 << 21) - 16, c_addr=(1 << 20) - 16,
+       M=4096, N=4096, K=4096, a_stride=1023, c_stride=1023, glog2=7), "92f0ff0fffffe1ffffffffffffffffff"),
+    (C("LUT_LOAD", table=2, src_addr=1536), "9e000600000000000000000000000000"),
 ]
 
 
@@ -54,6 +60,13 @@ def test_isa_golden_hand_checked():
     # DMA_LOAD: ddr_addr sits at bits [63:32] when chan/sp_buf/sp_addr precede it
     w = int.from_bytes(bytes.fromhex(GOLDEN[4][1]), "little")
     assert (w >> 32) & 0xFFFFFFFF == 0x40123400 and (w >> 64) & 0xFFF == 383  # rows stored minus one
+    # GEMM_GS: opcode 0x12 | gemv << 6; a_addr at [27:8]; glog2 in the top 3 bits [127:125]
+    gs = [h for c, h in GOLDEN if c.op == "GEMM_GS"][0]
+    w = int.from_bytes(bytes.fromhex(gs), "little")
+    assert w & 0x7F == 0x52 and (w >> 8) & 0xFFFFF == 4096 and w >> 125 == 3 and (w >> 81) & 0xFFF == 479
+    # LUT_LOAD: opcode 0x1E, table at [7:6], src_addr at [27:8]
+    w = int.from_bytes(bytes.fromhex(GOLDEN[-1][1]), "little")
+    assert w & 0x3F == 0x1E and (w >> 6) & 3 == 2 and (w >> 8) == 1536
 
 
 def _random_cmd(rng, op):
@@ -74,6 +87,10 @@ def _random_cmd(rng, op):
     if op == "GEMM" and f["int4"]:
         f["w_trans"] = 0
         f["N"] -= f["N"] % 2
+    if op == "GEMM_GS":
+        f["N"] -= f["N"] % 2
+    if op == "LUT_LOAD":
+        f["table"] = int(rng.integers(0, 3))
     return C(op, **f)
 
 
@@ -106,6 +123,10 @@ def test_isa_roundtrip_extremes():
                 f["vop"], f["dt_in"], f["dt_out"] = 8 * pick, 2 * pick, 2 * pick
             if op == "GEMM" and pick:
                 f["w_trans"] = 0
+            if op == "GEMM_GS" and not pick:
+                f["N"] = 2
+            if op == "LUT_LOAD" and pick:
+                f["table"] = 2
             c = C(op, **f)
             assert isa.decode(isa.encode(c)) == c
 
@@ -147,6 +168,39 @@ def test_isa_semantic_validation():
         C("GEMM", bogus=1)
     with pytest.raises(IsaError):
         isa.encode(C("GEMM", M=True))  # bools are not field values
+    with pytest.raises(IsaError):
+        isa.encode(C("GEMM_GS", N=3))
+    with pytest.raises(IsaError):
+        isa.encode(C("LUT_LOAD", table=3))
+
+
+def test_isa_alignment_rule():
+    """docs/isa.md §3: base addresses are 16-byte aligned. encode(aligned=True) / check_aligned enforce
+    it; the plain bit format still carries every address bit (decoder vectors cover full ranges)."""
+    ok = C("GEMM", a_addr=48, w_addr=64, c_addr=4096, M=2, N=16, K=16)
+    isa.check_aligned(ok)
+    isa.encode(ok, aligned=True)
+    for op, fld in [(op, n) for op, fs in isa.ALIGNED_FIELDS.items() for n in fs]:
+        c = C(op)
+        if op == "GEMM_GS":
+            c.f["N"] = 2
+        c.f[fld] = 8
+        isa.encode(c)                       # legal bits
+        with pytest.raises(IsaError):
+            isa.encode(c, aligned=True)     # but breaks the alignment rule
+    with pytest.raises(IsaError):
+        isa.encode_stream([ok, C("LUT_LOAD", src_addr=4)], aligned=True)
+    # every address-carrying field of every opcode is covered by the rule
+    for op, fs in isa.LAYOUTS.items():
+        addr = {n for n, _, _ in fs if n.endswith("_addr")}
+        assert addr == set(isa.ALIGNED_FIELDS.get(op, ())), op
+
+
+def test_isa_gs_layout():
+    # W4 block [K, N/2] then gm [ceil(K/G), N] at the next 16-byte line
+    assert isa.gs_group(3) == 64 and isa.gs_group(0) == 8 and isa.gs_group(7) == 1024
+    assert isa.gs_layout(128, 480, 3) == (128 * 240, 128 * 240, 128 * 240 + 2 * 480)
+    assert isa.gs_layout(100, 2, 3) == (100, 112, 112 + 2 * 2)
 
 
 def test_isa_decoder_rejects_garbage():

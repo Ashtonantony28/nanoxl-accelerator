@@ -77,8 +77,16 @@ def test_generate_cache_vs_nocache(bundle):
     assert g.generate(p, 24, use_cache=True) == g.generate(p, 24, use_cache=False)
 
 
+# Held-out budgets (AUDIT-1 A1-04): 16 windows (2,048 tokens) from the frozen seed. Measured on this
+# subset: W8A8 dPPL +0.59 %, top-1 0.948; W4A8 dPPL +3.77 %, top-1 0.875 (study, 200 windows: +0.96 /
+# +3.29 %, 0.946 / 0.881). Margin: about 2 sigma of the subset noise (~0.7 % dPPL at 2k tokens, study
+# §1 scaled) plus rounding, i.e. well inside the G2 targets (+3 % / +8 %); a doubled W4A8 loss fails.
+HELDOUT_WINDOWS = 16
+HELDOUT_BUDGET = {"w8a8": (2.0, 0.935), "w4a8": (5.5, 0.86)}   # (max dPPL %, min top-1 agreement)
+
+
 def test_heldout_accuracy_budget(bundle):
-    """Held-out val windows (frozen seed): integer CE within budget of FP32 CE."""
+    """Held-out val windows (frozen seed): integer PPL within budget of FP32 PPL on the same windows."""
     name, A, meta = bundle
     from nanoxl.model_fp import load_shakespeare, load_checkpoint, numpy_weights
     from nanoxl.quant.fpref import forward_f
@@ -87,25 +95,28 @@ def test_heldout_accuracy_budget(bundle):
     W = numpy_weights(model)
     T = meta["block_size"]
     rng = np.random.default_rng(HELDOUT_SEED)
-    starts = rng.integers(0, len(val) - T - 1, 4)
+    starts = rng.integers(0, len(val) - T - 1, HELDOUT_WINDOWS)
     golden.set_gemm(golden.gemm_exact_f64)
     g = golden.Golden(A, meta)
 
-    def ce(l, y):
+    def ce_sum(l, y):
         l = l - l.max(-1, keepdims=True)
-        return float(-(l[np.arange(len(y)), y] - np.log(np.exp(l).sum(-1))).mean())
-    d_ce, agree = [], []
+        return float(-(l[np.arange(len(y)), y] - np.log(np.exp(l).sum(-1))).sum())
+    s_f = s_i = 0.0
+    agree = []
     for s in starts:
         x = val[s:s + T + 1].astype(np.int64)
         lf = forward_f(W, model.config, x[None, :T])[0]
         li = g.forward(x[:T]).astype(np.float64) * meta["scales"]["logits"]
-        d_ce.append(ce(li, x[1:]) - ce(lf, x[1:]))
+        s_f += ce_sum(lf, x[1:])
+        s_i += ce_sum(li, x[1:])
         agree.append(np.mean(lf.argmax(-1) == li.argmax(-1)))
-    # Budgets: the G2 targets (+3 % / +8 % PPL). Top-1 floors set from the study windows
-    # (STUDY_SEED, docs/quant-study.md: 0.946 W8A8, 0.881 W4A8) minus a margin for 4-window noise.
-    budget = math.log(1.03) if name == "w8a8" else math.log(1.08)
-    assert np.mean(d_ce) < budget, d_ce
-    assert np.mean(agree) > (0.92 if name == "w8a8" else 0.84), agree
+    dppl = 100 * (math.exp((s_i - s_f) / (len(starts) * T)) - 1)
+    max_dppl, min_agree = HELDOUT_BUDGET[name]
+    g2 = 3.0 if name == "w8a8" else 8.0
+    assert max_dppl < g2
+    assert dppl < max_dppl, (name, dppl)
+    assert np.mean(agree) > min_agree, (name, np.mean(agree))
 
 
 def test_bundle_schema(bundle):

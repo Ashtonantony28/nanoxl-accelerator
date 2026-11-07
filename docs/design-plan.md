@@ -56,6 +56,13 @@ Architecture for v1 is classic GPT-2 (LayerNorm, GELU, learned positional embedd
 
 Decided in M0 using the golden model; the starting design:
 
+> **Superseded in part (annotation after AUDIT-1 A1-06; the text below is the original plan):** the
+> M0 study (ADR-002, contracts C2/C5) chose a **full-row 3-pass softmax** (not online), int8
+> probabilities in [0, 127] (not UINT8), **SmoothQuant off**, and gemmlowp rounding: SRDHM rounds
+> half toward +inf and RDivPOT rounds half away from zero (not round-half-to-even). The executable
+> contract is `nanoxl/numerics.py` / `nanoxl/quant/ops.py`; see docs/adr/ADR-002-quantization.md and
+> docs/contracts.md C2, C5. The ISA keeps the name `SOFTMAX_ONLINE` with first = last = 1.
+
 - **Weights:** symmetric, per-output-channel INT8. INT4 mode: symmetric, group-wise (group size 64 along K) with an INT8/FP16-free fixed-point scale per group, packed two per byte. Optional GPTQ/AWQ-style rounding offline (pure software, cheap win).
 - **Activations:** INT8, symmetric, **static per-tensor scales** from calibration, with SmoothQuant-style scale migration into weights for the LN→QKV and LN→FC inputs (GPT activations have outlier channels). Dynamic per-token quant is an M8 option because it needs a max-reduction before every GEMM.
 - **Accumulation:** INT32 in the array. **Requantization** INT32→INT8 with a fixed-point multiplier and right shift with round-half-to-even and saturation (the gemmlowp / TFLite scheme), done in the vector unit.
@@ -130,7 +137,7 @@ The M1 cycle model will replace these estimates with modelled numbers before any
 ### 6.2 Vector unit and special-function units
 - L-lane SIMD (64 on KV260) over INT8/INT16/INT32 with a small micro-op set: requant, add, mul, max, shift, saturate, horizontal reduce (sum, max).
 - SFUs shared across lanes or replicated (area vs throughput decided in M1): `exp` (fixed-point), `recip`, `rsqrt` (LUT + Newton), `gelu` (LUT).
-- **Softmax** = max-reduce → exp → sum-reduce → recip → scale, implemented online so it can consume score tiles as they come out of the array.
+- **Softmax** = max-reduce → exp → sum-reduce → recip → scale, implemented online so it can consume score tiles as they come out of the array. *(Superseded: full-row 3-pass softmax per ADR-002/C5; see the note in §4.)*
 - **LayerNorm** = sum and sum-of-squares reduce → mean/var → rsqrt → scale/shift.
 
 ### 6.3 Memory hierarchy and KV cache
@@ -142,7 +149,7 @@ The M1 cycle model will replace these estimates with modelled numbers before any
 | DDR | weights (streamed), embeddings, overflow KV, command buffers, logits | 4 GB | 512 MB |
 
 - KV layout `[layer][head][pos][d_head]` so one head's K for all positions is a contiguous burst; V the same.
-- Decode step appends one K/V row per head per layer; attention reads K/V rows `0..t` as tiles and feeds online softmax. This is flash-decoding style: the score row is never materialized beyond a tile.
+- Decode step appends one K/V row per head per layer; attention reads K/V rows `0..t` as tiles and feeds online softmax. This is flash-decoding style: the score row is never materialized beyond a tile. *(Superseded: the built design materializes the full score row in ACC and runs the 3-pass softmax, ADR-002/C5.)*
 - Context overflow policy for v1: stop at ctx (nanoGPT crops the window). Stretch: ring buffer + sliding window.
 - A **DDR-only KV mode** exists on both boards so the URAM tier is an optimization you can measure, not a dependency.
 

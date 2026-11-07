@@ -246,9 +246,9 @@ M_DEPTH, w_trans from WBUF/KVBUF). Accept→done latency = occupancy + 2N+4 (arr
 (readers, write-back, done register).
 
 Tiny model GEMM shapes at the KV260 size (N=32, Verilator, compiled for `array_n=32`), next to
-`nanoxl.cyclemodel.cost` (occupancy):
+`nanoxl.cyclemodel.cost` (occupancy; the model column is the SG7a-era model, see the note below):
 
-| bundle | op | M | N | K | tiles | measured occ | accept→done | model occ |
+| bundle | op | M | N | K | tiles | measured occ | accept→done | model occ (SG7a era, superseded) |
 |---|---|---|---|---|---|---|---|---|
 | w8a8 | GEMM c_attn | 16 / 1 | 256 | 128 | 32 | 1024 | 1115 / 1100 | 528 |
 | w8a8 | GEMM attn_proj | 16 / 1 | 128 | 128 | 16 | 512 | 603 / 588 | 272 |
@@ -262,14 +262,16 @@ Tiny model GEMM shapes at the KV260 size (N=32, Verilator, compiled for `array_n
 | w4a8 | GEMM_GS mlp proj panels | 16 / 1 | 96, 32 | 512 | 48, 16 | 1584, 528 | 1675, 619 / 1660, 604 | 776, 264 / 416, 144 |
 
 The tiny model has M ≤ 16 < N = 32, so every tile is weight-load bound (kt = 32 rows): the RTL
-loads **one weight row per cycle** (array_ctrl, C3), while the cycle model assumes
-`wload_rows_per_cycle = 2` (ADR-003) and, for INT4, two rows per beat, so it predicts 2x (INT8)
-to 3.8x (W4A8 decode) fewer cycles than measured. Array-bound tiles (M ≥ kt, e.g. P·V with
-M = 16 = K) are where the RTL beats the model's fixed cost. Either the cycle model uses
-`wload_rows_per_cycle = 1` without the INT4 doubling (what the RTL does today), or array_ctrl
-gets a 2-row weight port (two bank rows per cycle, a 2N-byte W port, plus a WBUF read port of
-that width). The LM head pays 624 instead of 384 cycles for its 65-byte rows (a second beat
-per straddling row).
+loads **one weight row per cycle** (array_ctrl, C3). The "model occ" column was measured against the
+M1-era cycle model (`wload_rows_per_cycle = 2`, INT4 two rows per beat). **Superseded:** the merged
+SG4c model already charges one row per cycle without the INT4 doubling, and since AUDIT-1 (A1-05)
+it also charges the scale beat on every `GEMM_GS` tile, the second beat of ragged weight rows (LM
+head N=65: 624) and the accept→done latency (2N+4 + 7 + M, + N/2 through the w_trans transposer).
+`nanoxl.cyclemodel.cost` now equals the "measured occ" column for every row of the table, and
+accept→done to within 1 cycle (`tests/audit/test_audit1.py::test_a1_05_*`, `test_a1_06_*`). A
+2-row weight port (two bank rows per cycle, a 2N-byte W port and a WBUF read port of that width)
+remains a priced what-if (`RtlTiming.array_rows_per_cycle`, bench/results/fixes.md); `WPL =
+ceil(N/16)+1` would remove the ragged-row beat (`RtlTiming.array_w_lines`).
 
 ### Verification (`tests/rtl/test_array_seq.py`, cocotb `array_seq_cocotb.py`)
 

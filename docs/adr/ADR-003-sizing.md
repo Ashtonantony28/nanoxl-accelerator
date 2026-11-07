@@ -130,6 +130,8 @@ bit-exact. `test_compiler_decode_utilization_measured` guards against a regressi
 | PYNQ-Z2 | shakespeare | 4 | 229 → – → **176** | 82.3 → – → **84.5** | 281 |
 
 Batch-1 G3 now holds for prefill: the array is 83 % busy on the KV260 and 87 % on the PYNQ-Z2.
+*(Superseded by the AUDIT-1 update below: with the VEC engine priced at its measured port
+bandwidth the KV260 prefill array utilization is 65 %, PYNQ-Z2 83 %; G3 still holds.)*
 It does not hold for KV260 decode, which uses 46 % of the assumed 8 GB/s because the single
 128-bit DMA master tops out at 4 GB/s. The PYNQ-Z2 reaches 70 % of its weight bound and 88 %
 of what its 64-bit port can deliver.
@@ -176,3 +178,47 @@ behind the DMA queue (critical-path share < 0.1 %).
 are. The weight-port row in that table ("2 rows/cycle" for the KV260) is not what was built: the RTL
 has 1 row per cycle. It becomes fix 3, behind the second DMA master (fix 1), which matters most
 for M7. The 8 GB/s KV260 assumption now requires two DMA masters on two HP ports.
+
+## Update (AUDIT-1 fix, wave 4): VEC engine priced at its measured port bandwidth
+
+AUDIT-1 A1-01 found that the cycle model charged VEC-queue work at L = 64 elements per cycle, while
+the built VEC engine (`rtl/vec_seq.sv`) moves one 16-byte line per cycle per port: int32 ACC rows
+(REQUANT, softmax scores) arrive at 4 elements per cycle and int16 LN rows at 8, and REQUANT also
+reads a 16-byte record per output channel. The model now prices every VEC-queue command from
+measurements of the RTL at L = 4, 16 and 64 (`bench/vec_seq_perf.py`, table in
+docs/vector-unit.md §9.3, every shape within 5 %, `tests/audit/test_audit1.py::test_a1_01_*`), and
+the smaller A1-05 gaps (GEMM_GS scale beat on every tile, ragged LM-head rows, array_seq
+accept→done latency, LN / LUT_LOAD fixed costs) are closed. `python3 bench/roofline.py`
+regenerated `bench/results/`.
+
+| board | model | W | prefill ms (T = 256): SG4c → **now** | prefill array util: SG4c → **now** | decode tok/s: SG4c → **now** |
+|---|---|---|---|---|---|
+| KV260 | shakespeare | 8 | 13.9 → **17.6** | 0.83 → **0.65** | 333 → **331** |
+| KV260 | shakespeare | 4 | 14.2 → **17.5** | – → **0.66** | 597 → **592** |
+| KV260 | tiny | 8 | 0.91 → **1.60** (T = 128) | – → **0.29** | 3,780 → **3,651** |
+| PYNQ-Z2 | shakespeare | 8 | 86.5 → **90.7** | 0.87 → **0.83** | 99 → **99** |
+| PYNQ-Z2 | shakespeare | 4 | 84.5 → **88.1** | – → **0.86** | 176 → **175** |
+
+**G3 still holds for batch-1 prefill** (≥ 50 % array utilization): 65 % on the KV260, 83 % on
+the PYNQ-Z2. The KV260 margin shrank from 33 to 15 points. KV260 prefill critical path
+(`bench/results/breakdown.md`): linear GEMMs 64 %, softmax 11 % (int32 scores at 4 per cycle, 3 passes),
+LN 6 %, attention GEMMs 5 %, requant 4 % on the path (37 % VEC busy, mostly hidden behind the array),
+GELU, residual adds and KV_APPEND 2-3 % each. Decode does not change: it is a DMA stream (VEC work
+is < 1 % of the decode critical path). The tiny model (d = 128) is VEC-bound in prefill (29 %),
+which G3 does not cover (G3 is stated for `shakespeare`).
+
+**RTL change that restores the margin (priced what-if, `RtlTiming.vec_port_lines`, `FIXES["4-line (64 B)
+VEC engine ports"]`):** widen the VEC engine's A, B, P and D ports to 4 lines (64 bytes) per cycle,
+or bank ACC/ABUF/PBUF by line so that `vec_seq_rd/wr` move 4 lines per cycle (docs/vector-unit.md
+§9.3 asks SG7c for this). KV260 W8 prefill 17.6 → **14.7 ms**, array utilization 0.65 → **0.79**
+(W4: 17.5 → 14.7 ms); decode unchanged. 8-line ports give only 14.4 ms (0.80): beyond 4 lines the
+VEC engine's per-row fixed costs and the one-command-at-a-time drain dominate. With the SFU second
+row buffer on top: 14.3 ms (0.81). The cost is ACC/ABUF banking (4 line banks, a crossbar on the
+VEC side) and 512-bit read/write paths into `vec_seq_rd/wr`; it adds no DSPs. Recommended for M6
+alongside the second DMA master, since the KV260 prefill target depends on it more than on any
+other fix (`bench/results/fixes.md`: the next best prefill fix, the SFU second row buffer, gives
+17.6 → 16.5 ms alone).
+
+The decisions in the table at the top are unchanged. The "Lanes" finding (4.) is superseded for
+the as-built RTL: with 16-byte ports, L = 64 buys almost nothing over L = 16 for int8 streams and
+nothing for int32 / int16 rows (docs/vector-unit.md §9.3); L = 64 pays off only with the wider ports.

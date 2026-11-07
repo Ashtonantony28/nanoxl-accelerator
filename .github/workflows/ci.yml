@@ -3,10 +3,16 @@ on: [push, pull_request]
 jobs:
   fast:
     runs-on: ubuntu-24.04
+    env:
+      # formal proofs (tests/rtl/test_ctrl_formal.py) fail instead of skipping when a tool is missing
+      NANOXL_REQUIRE_FORMAL: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: sudo apt-get update && sudo apt-get install -y iverilog yosys
+      - run: sudo apt-get update && sudo apt-get install -y iverilog yosys z3
       - run: pip install numpy pytest cocotb cocotbext-axi z3-solver
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: which yosys-smtbmc && z3 --version
       - run: make test-fast SIM=icarus
+      - run: make test-audit

@@ -1,7 +1,9 @@
 # ADR-004: W4A8 group scales in the array, SFU table loading, alignment rule (ISA additions)
 
-Status: proposed (SG4b / M1 close-out, 2026-11-07). Extends contract C4 (`docs/isa.md`) additively;
-implications for C3 (`rtl/array_ctrl.sv`, SG2) listed below for the integrator; no RTL is changed here.
+Status: **accepted and implemented** (proposed by SG4b / M1 close-out, 2026-11-07; implemented in
+C1b/C3 by `rtl/array_ctrl.sv` and `rtl/array_seq.sv`, SG7a, wave 3; status updated after AUDIT-1
+A1-06). Extends contract C4 (`docs/isa.md`) additively. When this ADR was written no RTL was changed;
+the C3 additions below are now built.
 Evidence: `tests/py/test_funcsim_golden.py` (compiled tiny W8A8 and W4A8 bit-identical to
 `nanoxl.golden`: logits, KV cache, saturation counts, 100-token sequences), `tests/py/test_isa.py`
 (new golden vectors), `tests/py/test_cyclemodel.py::test_cyclemodel_gemm_gs_cost`.
@@ -67,15 +69,20 @@ by funcsim (strict by default). The bit format still carries the low 4 bits, so 
 decoder vectors (some deliberately unaligned) stay valid bit patterns.
 
 ## Cost (cycle model, `nanoxl/cyclemodel.py`)
-* GEMM_GS: the scale row is one extra beat of N bytes (= two INT4 weight rows of port bandwidth) on the
-  first K-tile of every group. Weight-load bound tiles (GEMV): `ceil((N+2)/(2·rpc))` instead of
+* **As built (AUDIT-1 A1-05/A1-06; supersedes the estimate in this bullet):** array_seq sends the
+  scale beat on **every** GEMM_GS tile (tiles are split at min(N, G) rows), so a weight-bound tile
+  costs k_tile + 1 cycles at one weight row per cycle (c_attn N=384 K=128 G=64 at N=32: 1,584 cycles,
+  measured = model), and the scale multiply sits in the existing RMW stage with **no extra latency**
+  (C3: 2N+4 with `gs` too). The original estimate follows.
+* GEMM_GS (original estimate): the scale row is one extra beat of N bytes (= two INT4 weight rows of
+  port bandwidth) on the first K-tile of every group. Weight-load bound tiles (GEMV): `ceil((N+2)/(2·rpc))` instead of
   `ceil(N/(2·rpc))` cycles, i.e. 9 vs 8 at N = 32, 2 rows/cycle (+6 % on the array time of W4 decode,
   which is DDR-bound anyway: 512 B per tile = 16 DDR cycles at 32 B/cycle). Array-bound tiles
   (prefill, M ≥ 9): 0 cycles. The multiply sits in the existing RMW stage (+1 pipeline stage of
   latency, no throughput cost). KV260 shakespeare W4A8 decode: 1320 tok/s (was 1360 with
   per-channel-only scales, the difference is mostly the 3 % scale bytes).
-* LN / SOFTMAX: 3 passes over the row + a per-row bubble (estimate: SG5 has not published SFU timing;
-  `HwConfig.sfu_row_bubble`, `row_latency_*`).
+* LN / SOFTMAX: 3 passes over the row + a per-row bubble (estimate at the time: SG5 had not published
+  SFU timing). Superseded by the measured VEC-engine costs, docs/vector-unit.md §9.3 (AUDIT-1 A1-01).
 
 ## What `rtl/array_ctrl.sv` (SG2) needs — proposed C3 addition
 1. Command field `cmd_gs` (1 bit). When set, the weight stream carries **k + 1** beats: beat 0 is

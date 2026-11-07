@@ -1,12 +1,14 @@
 """Cycle-approximate performance model of a NanoXL command stream, calibrated to the measured RTL.
 
-Every cost below is a measured number from the RTL docs (wave 2), not an estimate:
-docs/control.md (command fetch, dispatch, queues, DMA engine), docs/array.md (C3 tile timing) and
-docs/sfu.md (LN / softmax / LUT timing). The only free parameters are the board-level DDR
-bandwidth and latency in ``HwConfig`` (unknown until M7) and the "what-if" switches in
-``RtlTiming`` used to price proposed fixes. The older estimate knobs of ``HwConfig``
-(``wload_rows_per_cycle``, ``issue_cycles``, ``fifo_depth``, ``vec_latency``, ``row_latency_*``,
-``sfu_row_bubble``, ``fill_drain``) are no longer read.
+Every cost below is calibrated to measured RTL, not estimated: docs/control.md (command fetch,
+dispatch, queues, DMA engine), docs/array.md §7 (array_seq tile timing, measured at N = 32) and
+docs/vector-unit.md §9.3 / bench/results/vec_seq_perf.json (the VEC engine, rtl/vec_seq.sv,
+measured per command at L = 4, 16, 64). The variable parts of the VEC costs follow from the port
+and lane widths; only per-command / per-row fixed costs are fitted (``VEC_CAL``, within 5 % of every
+measured shape). The only free parameters are the board-level DDR bandwidth and latency in
+``HwConfig`` (unknown until M7) and the "what-if" switches in ``RtlTiming`` used to price proposed
+fixes. The older estimate knobs of ``HwConfig`` (``wload_rows_per_cycle``, ``issue_cycles``,
+``fifo_depth``, ``vec_latency``, ``row_latency_*``, ``sfu_row_bubble``, ``fill_drain``) are not read.
 
 Machine model (docs/control.md §1)
   * **Fetch**: the command ring is read over AXI in INCR bursts of up to 8 words, one burst in
@@ -27,19 +29,27 @@ until results are visible):
             by min(port bytes/cycle, DDR bytes/cycle); at most 4 bursts (<= 256 beats, no 4 KiB
             crossing) in flight bound strided small rows to 4 bursts per latency. STORE: done at the
             last B response (same formula).
-  GEMM      C3 tiles: for each N-tile and K-tile, max(M, k_tile) cycles (one weight row and one
-            activation row per cycle, zero inter-tile bubbles; INT4 still moves one K-row per beat);
-            latency 2N + 4 (first a beat -> first out beat).
-  GEMM_GS   as GEMM (K-tiles split at group boundaries), plus one scale beat on the first K-tile
-            of each group: max(M, k_tile + 1) (ADR-004).
-  VEC unit  each vec_unit row command costs 1 accept cycle + its beats (docs/vector-unit.md §5.4):
-            VEC 1 + ceil(len/L); REQUANT M (1 + ceil(N/L)); KV_APPEND rows x heads x (1 + ceil(dh/L));
-            GELU 1 + ceil(len/L) (+16 table load when not resident); latency 6 (pipeline).
-  LN        rows x (1 + 3 ceil(cols/L) + 19), rows non-overlapping (one row buffer)
-            + LN block load 2 + ceil(cols/8) + ceil(cols/4) when the block is not resident.
-  SOFTMAX   rows x (1 + 3 ceil(cols/L) + 19) (SOFTMAX_RQ, int32 scores) + 1 record load if not resident.
-  LUT_LOAD  32 cycles per table (one 16-byte PBUF line per cycle).
-Residency: the VEC engine keeps an LN block / GELU table / score record resident per PBUF address
+  GEMM      C3 tiles (array_seq): for each N-tile and K-tile, max(M, W-port beats of the tile)
+            cycles: one weight row per beat (INT4 too); a weight row segment that straddles the
+            ceil(N/16)-line W window (ragged rows such as the 65-byte LM head) costs a second beat.
+            Row chunks of M_DEPTH = 256. Zero inter-tile bubbles. Latency (last input beat ->
+            done) 2N + 4 + 7 + min(M, 256), + N/2 for w_trans (transposer).
+  GEMM_GS   as GEMM, K-tiles split at group boundaries, plus one scale beat on every tile:
+            max(M, k_tile + 1) (array_seq; ADR-004's "first tile of each group" is superseded).
+  VEC engine one command at a time (no overlap; the drain is in the fixed cost). Each of the four
+            16-byte line ports (A, B, P, D) moves one line per cycle, so a stream of n elements of
+            eb bytes takes max(ceil(n/L), ceil(n eb/16)) cycles ("stream"):
+            VEC       F + sum over 4096-element chunks of (1 + stream(len, max eb))
+            GELU      F + 1 + stream(len, 1) (+17 when the table is not resident)
+            KV_APPEND F + rows x heads x (1 + stream(dh, 1))
+            REQUANT   per column chunk of <= 256: N records (one P line each; 1 if per-tensor)
+                      + F_chunk + M x (1 + stream(N, 4))   [int32 ACC rows: 4 elements / cycle]
+            LN, SOFTMAX_ONLINE  F + rows x (1 + p1 + nb + p3 + f) with nb = ceil(cols/L),
+                      p1 = max(nb, input lines - hidden), p3 = max(nb, output lines - hidden)
+                      (int16/int8 LN rows, int32 scores), + block lines + 1 when not resident
+            LUT_LOAD  40 cycles (32 PBUF lines + loader), 6 when the table is resident
+            Latency (occupancy -> done) 2.
+Residency: the VEC engine keeps an LN block / GELU table / score record / LUT resident per PBUF address
 until a DMA writes that PBUF range (the current compiler reloads parameters every program, so in
 practice every LN pays its block load).
 
@@ -66,6 +76,22 @@ def _cd(a, b):
     return -(-a // b)
 
 
+# VEC engine fixed costs fitted to bench/results/vec_seq_perf.json (rtl/vec_seq.sv measured at
+# L = 4, 16 on Icarus and 64 on Verilator, ports always ready, read latency 2; docs/vector-unit.md
+# §9.3). Variable parts are not fitted: they are the line-port and lane counts. Keys:
+#   vec / gelu / kv   per-command fixed cycles (decode, row setup, pipeline drain)
+#   rq_chunk, rq_row  REQUANT fixed cycles per column chunk (<= RQ_MAX) and per row of a chunk
+#   ln, sm            (H, Hw, f, F): input lines hidden behind the previous row beyond one beat,
+#                     output lines hidden, fixed cycles per row, fixed cycles per command
+VEC_CAL = {
+    4: dict(vec=13, gelu=21, kv=12, rq_chunk=25, rq_row=1, ln=(0, 0, 18, 17), sm=(0, 0, 18, 17)),
+    16: dict(vec=14, gelu=23, kv=13, rq_chunk=26, rq_row=1, ln=(0, 0, 18, 21), sm=(2, 0, 18, 23)),
+    64: dict(vec=17, gelu=26, kv=16, rq_chunk=29, rq_row=1, ln=(6, 0, 15, 36), sm=(4, 10, 17, 46)),
+}
+RQ_MAX = 256       # vec_seq REQUANT column chunk (record buffer)
+VEC_CH = 4096      # vec_seq VEC / GELU row chunk (elements)
+
+
 @dataclass(frozen=True)
 class RtlTiming:
     """Measured RTL timing (defaults) plus what-if switches for proposed fixes."""
@@ -85,17 +111,21 @@ class RtlTiming:
     dma_coalesce: bool = False     # what-if: contiguous rows (ds = ss = row_bytes) merged into one row
     dma_max_bursts: int = 4        # outstanding bursts
     dma_max_beats: int = 256       # beats per burst
-    # array (docs/array.md §2, C3)
+    # array (docs/array.md §2 and §7, C3, array_seq)
     array_rows_per_cycle: int = 1  # what-if: weight rows per cycle into the array (ADR-003 proposed 2)
     array_lat_extra: int = 4       # first output = 2N + 4
-    # vector unit / SFU (docs/vector-unit.md §5.4, docs/sfu.md)
-    vec_accept: int = 1            # command-accept cycle per vec_unit row command
-    vec_latency: int = 6
-    ln_row_fixed: int = 19         # LN: 4 mu + 3 pass-2 tail + 6 rsqrt + 6 pass-3 tail
-    sm_row_fixed: int = 19         # SOFTMAX_RQ: 6 requant + 3 + 5 recip + 5
+    array_wb_extra: int = 7        # array_seq accept->done = occ + 2N+4 + 7 + M (+ N/2 for w_trans)
+    array_w_lines: int = 0         # W-port window in 16-byte lines; 0 = ceil(N/16) (array_seq WPL default).
+                                   # A ragged weight row that straddles the window costs a second beat
+    gs_beat_every_tile: bool = True  # array_seq: every GEMM_GS tile carries its group's scale beat
+    m_depth: int = 256             # array_ctrl accumulator rows (row chunk)
+    # VEC engine (rtl/vec_seq.sv, docs/vector-unit.md §9): line ports + per-L fitted fixed costs
+    vec_port_lines: int = 1        # 16-byte lines per cycle per VEC port (A, B, P, D); what-if > 1 = wider/banked
+    vec_latency: int = 2           # accept->done minus occupancy (commands run one at a time)
+    vec_cal: dict = field(default_factory=lambda: dict(VEC_CAL))
     sfu_row_buffers: int = 1       # what-if 2: ping-pong row buffer overlaps pass 1 of row n+1
-    lut_load_cycles: int = 32      # per LUT_LOAD table
-    gelu_table_cycles: int = 16
+    lut_load_cycles: int = 40      # LUT_LOAD miss (32 PBUF lines + loader); measured
+    lut_hit_cycles: int = 6        # LUT_LOAD of a table already resident at that address
     params_resident: bool = False  # what-if: LN blocks / GELU tables / score records stay in SFU slots
 
     def with_(self, **kw) -> "RtlTiming":
@@ -164,68 +194,141 @@ def _dma_cost(f, hw, tm):
     return lat + data, 0, {"ddr_bytes": total}
 
 
-def _gemm_tiles(M, N, K, na, kt_max, rpc, scale_every=None):
-    """Sum over C3 tiles of max(M, k_tile / rpc) (+1 scale beat on group-first tiles)."""
+def _seg_beats(start, nbytes, window):
+    """array_seq_rd: a byte segment takes one beat when it fits the window of ``window`` bytes
+    from its start line, else two."""
+    return 1 if start % 16 + nbytes <= window else 2
+
+
+def _w_row_beats(f, op, k0, kt, n0, nt, window):
+    """W-port beats of one tile (array_seq addressing, docs/array.md §7)."""
+    w, N, K = f["w_addr"], f["N"], f["K"]
+    if op == "GEMM" and f["w_trans"]:
+        rb, step, base = kt, K, w + n0 * K + k0             # nt columns of kt bytes
+        cnt = nt
+    elif op == "GEMM_GS" or f["int4"]:
+        rb, step, base = _cd(nt, 2), N // 2, w + k0 * (N // 2) + n0 // 2
+        cnt = kt
+    else:
+        rb, step, base = nt, N, w + k0 * N + n0
+        cnt = kt
+    if step % 16 == 0:
+        return cnt * _seg_beats(base, rb, window)
+    return sum(_seg_beats(base + r * step, rb, window) for r in range(cnt))
+
+
+def _gemm_occ(c, hw, tm, kt_max, gs):
+    """Sum over C3 tiles of max(mc, W-port beats of the tile / rows per cycle) (+1 scale beat per
+    GEMM_GS tile), row chunks of m_depth."""
+    f, op, na = c.f, c.op, hw.array_n
+    M, N, K = f["M"], f["N"], f["K"]
+    window = 16 * (tm.array_w_lines or _cd(na, 16))
+    G = isa.gs_group(f["glog2"]) if gs else None
     cyc = 0
-    k = 0
-    while k < K:
-        kt = min(kt_max, K - k)
-        w = _cd(kt, rpc)
-        if scale_every is not None and k % scale_every == 0:
-            w += 1
-        cyc += max(M, w)
-        k += kt
-    return cyc * _cd(N, na)
+    for n0 in range(0, N, na):
+        nt = min(na, N - n0)
+        k0 = 0
+        while k0 < K:
+            kt = min(kt_max, K - k0)
+            w = _w_row_beats(f, op, k0, kt, n0, nt, window)
+            if op == "GEMM" and f["w_trans"]:
+                w = max(w, kt)                               # transposer emits kt K-rows
+            w = _cd(w, tm.array_rows_per_cycle)
+            if gs and (tm.gs_beat_every_tile or k0 % G == 0):
+                w += 1
+            for m0 in range(0, M, tm.m_depth):
+                cyc += max(min(tm.m_depth, M - m0), w)
+            k0 += kt
+    return cyc
+
+
+def vec_cal(hw: HwConfig, tm: RtlTiming) -> dict:
+    """Fitted VEC-engine constants for hw.lanes (nearest measured lane count in log2)."""
+    L = hw.lanes
+    k = min(tm.vec_cal, key=lambda x: (abs(math.log2(x) - math.log2(L)), x))
+    return tm.vec_cal[k]
+
+
+def _vec_cost(c, hw, tm, resident):
+    """VEC-engine occupancy (rtl/vec_seq.sv, docs/vector-unit.md §9.3): commands run one at a time;
+    each port moves vec_port_lines 16-byte lines per cycle, so a stream of n elements of eb bytes
+    takes max(ceil(n/L), ceil(n eb / (16 w))) cycles; plus fitted fixed costs (VEC_CAL)."""
+    f, op, L = c.f, c.op, hw.lanes
+    cal = vec_cal(hw, tm)
+    pb = 16 * tm.vec_port_lines
+
+    def stream(n, eb):
+        return max(_cd(n, L), _cd(n * eb, pb))
+
+    if op == "LUT_LOAD":
+        return (tm.lut_hit_cycles if resident else tm.lut_load_cycles), tm.vec_latency
+    if op == "VEC":
+        eb = max(isa.DT_BYTES[f["dt_in"]], isa.DT_BYTES[f["dt_out"]])
+        n, occ = f["len"], cal["vec"]
+        for c0 in range(0, max(n, 1), VEC_CH):
+            occ += 1 + stream(min(VEC_CH, n - c0), eb)
+        return occ, tm.vec_latency
+    if op == "GELU":
+        n, occ = f["len"], cal["gelu"]
+        for c0 in range(0, max(n, 1), VEC_CH):
+            occ += 1 + stream(min(VEC_CH, n - c0), 1)
+        if not resident:
+            occ += 256 // pb + 1                              # GELU table: 16 PBUF lines
+        return occ, tm.vec_latency
+    if op == "KV_APPEND":
+        return cal["kv"] + f["rows"] * f["heads"] * (1 + stream(f["dh"], 1)), tm.vec_latency
+    if op == "REQUANT":
+        M, N = f["M"], f["N"]
+        occ = 0
+        for n0 in range(0, N, RQ_MAX):
+            nc = min(RQ_MAX, N - n0)
+            rec = 1 if f["per_tensor"] else _cd(nc * 16, pb)   # one 16-byte record per channel (P port)
+            occ += rec + cal["rq_chunk"] + M * (cal["rq_row"] + stream(nc, 4))
+        return occ, tm.vec_latency
+    if op in ("LN", "SOFTMAX_ONLINE"):
+        rows, cols = f["rows"], f["cols"]
+        eb = (2 if f["in16"] else 1) if op == "LN" else 4
+        H, Hw, fx, F = cal["ln" if op == "LN" else "sm"]
+        nb = _cd(cols, L)
+        il, ol = _cd(cols * eb, pb), _cd(cols, pb)
+        hide = (_cd(L * eb, 16) + H) / tm.vec_port_lines
+        p1 = max(nb, il - hide)                                 # pass 1: stream in (A port)
+        p3 = max(nb, ol - Hw / tm.vec_port_lines)               # pass 3: out (D port)
+        if tm.sfu_row_buffers >= 2:
+            # what-if (not measured): pass 1 of row n+1 overlaps passes 2-3 of row n
+            occ = F + p1 + rows * (1 + max(p1, nb + p3 + fx))
+        else:
+            occ = F + rows * (1 + p1 + nb + p3 + fx)
+        if not resident:
+            occ += (ln_block_layout(cols)[2] // 16 if op == "LN" else 1) + 1
+        return math.ceil(occ), tm.vec_latency
+    raise ModelError(op)
 
 
 def cost(c: isa.Cmd, hw: HwConfig, tm: RtlTiming | None = None, resident: bool = False):
     """(occupancy, latency, info) for one command; info carries ddr_bytes / macs. ``resident`` says the
-    command's SFU parameter block (LN block, GELU table, score record) is already loaded."""
+    command's SFU parameter block (LN block, GELU table, score record, LUT) is already loaded."""
     tm = tm or timing_for(hw)
-    f, op, na, L = c.f, c.op, hw.array_n, hw.lanes
-    alat = 2 * na + tm.array_lat_extra
+    f, op, na = c.f, c.op, hw.array_n
     if op in ("DMA_LOAD", "DMA_STORE"):
         return _dma_cost(f, hw, tm)
-    if op == "GEMM":
+    if op in ("GEMM", "GEMM_GS"):
         M, N, K = f["M"], f["N"], f["K"]
-        return _gemm_tiles(M, N, K, na, na, tm.array_rows_per_cycle), alat, {"macs": M * N * K}
-    if op == "GEMM_GS":
-        M, N, K = f["M"], f["N"], f["K"]
-        G = isa.gs_group(f["glog2"])
-        # tiles split at group boundaries: tile height min(N, G) when G divides into tiles
-        kt = min(na, G)
-        occ = _gemm_tiles(M, N, K, na, kt, tm.array_rows_per_cycle, scale_every=G)
-        return occ, alat, {"macs": M * N * K}
+        gs = op == "GEMM_GS"
+        kt = min(na, isa.gs_group(f["glog2"])) if gs else na    # GEMM_GS tiles never straddle a group
+        occ = _gemm_occ(c, hw, tm, kt, gs)
+        lat = 2 * na + tm.array_lat_extra + tm.array_wb_extra + min(M, tm.m_depth)
+        if op == "GEMM" and f["w_trans"]:
+            lat += na // 2
+        return occ, lat, {"macs": M * N * K}
     if op == "ATTN_TILE":
         rows, ln = f["rows"], f["len"]
         occ = 2 * _cd(ln, na) * 2 * max(rows, na)
-        return occ, alat, {"macs": 2 * rows * ln * 64}
-    acc, vl = tm.vec_accept, tm.vec_latency
-    if op == "LUT_LOAD":
-        return tm.lut_load_cycles, 0, {}
-    if op == "VEC":
-        return acc + _cd(f["len"], L), vl, {}
-    if op == "GELU":
-        return acc + _cd(f["len"], L) + (0 if resident else tm.gelu_table_cycles), vl, {}
-    if op == "REQUANT":
-        return f["M"] * (acc + _cd(f["N"], L)), vl, {}
-    if op == "KV_APPEND":
-        return f["rows"] * f["heads"] * (acc + _cd(f["dh"], L)), vl, {}
-    if op in ("LN", "SOFTMAX_ONLINE"):
-        rows, cols = f["rows"], f["cols"]
-        nb = _cd(cols, L)
-        fixed = tm.ln_row_fixed if op == "LN" else tm.sm_row_fixed
-        if tm.sfu_row_buffers >= 2:
-            # pass 1 of row n+1 overlaps passes 2-3 of row n (modelled, not measured)
-            occ = rows * (acc + 2 * nb + fixed) + nb
-        else:
-            occ = rows * (acc + 3 * nb + fixed)
-        if not resident:
-            occ += (2 + _cd(cols, 8) + _cd(cols, 4)) if op == "LN" else 1
-        return occ, 0, {}
+        return occ, 2 * na + tm.array_lat_extra, {"macs": 2 * rows * ln * 64}
     if op in ("WAIT", "SIGNAL", "IRQ", "END"):
         return 0, 0, {}
-    raise ModelError(op)
+    occ, lat = _vec_cost(c, hw, tm, resident)
+    return occ, lat, {}
 
 
 def _param_key(c):
@@ -236,6 +339,8 @@ def _param_key(c):
         return f["lut_addr"], f["lut_addr"] + 256
     if c.op == "SOFTMAX_ONLINE":
         return f["ctx_addr"], f["ctx_addr"] + 16
+    if c.op == "LUT_LOAD":
+        return f["src_addr"], f["src_addr"] + 512
     return None
 
 
@@ -488,6 +593,7 @@ FIXES = {
     "DMA command pipelining": dict(dma_pipelined=True, signal_blocks=False),
     "second DMA master (2 HP ports)": dict(dma_masters=2),
     "on-chip / prefetched command ring": dict(fetch_over_axi=False),
+    "4-line (64 B) VEC engine ports": dict(vec_port_lines=4),
     "SFU second row buffer": dict(sfu_row_buffers=2),
     "resident SFU parameter slots": dict(params_resident=True),
     "2-row array weight port": dict(array_rows_per_cycle=2),

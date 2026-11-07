@@ -161,7 +161,8 @@ def test_compiler_batch_kv_capacity():
     Compiler(g, p, KV260.with_(kv_onchip=False), n_slots=8)
 
 
-@pytest.mark.parametrize("cfg", [SHAKESPEARE, SHAKESPEARE.with_(wbits=4), M25], ids=lambda c: f"{c.name}-w{c.wbits}")
+@pytest.mark.parametrize("cfg", [SHAKESPEARE, SHAKESPEARE.with_(wbits=4), pytest.param(M25, marks=pytest.mark.slow)],
+                         ids=lambda c: f"{c.name}-w{c.wbits}")   # m25 (~28 s) in the slow tier (AUDIT-1 A1-10)
 def test_compiler_real_models_fit_isa_fields(cfg):
     """Every command of a full prefill and a late decode step validates (field widths suffice)."""
     g = build_gpt_graph(cfg)
@@ -251,7 +252,8 @@ def test_compiler_from_bundle_graph():
 def test_compiler_decode_utilization_measured():
     """Regression for the coalesced DMA emission: under the MEASURED RTL timing (one 128-bit DMA
     master, 4 outstanding bursts, a realigner bubble per row) shakespeare decode on the KV260 keeps the
-    DMA port >= 85 % busy moving bytes, prefill keeps the array >= 70 % busy, and no compiled DMA moves
+    DMA port >= 85 % busy moving bytes, prefill keeps the array >= 60 % busy (G3: 50 %; 65 % since the
+    VEC engine is priced at its 16-byte ports, AUDIT-1 A1-01), and no compiled DMA moves
     a contiguous transfer as several rows."""
     from nanoxl.cyclemodel import estimate, timing_for
     from nanoxl.graph import SHAKESPEARE
@@ -266,4 +268,4 @@ def test_compiler_decode_utilization_measured():
     port = timing_for(KV260).dma_beat_bytes
     cycles = KV260.clock_hz / r["decode_tok_s"]
     assert r["decode_ddr_MB_per_step"] * 1e6 / (port * cycles) > 0.85
-    assert r["prefill_array_util"] > 0.7
+    assert r["prefill_array_util"] > 0.6

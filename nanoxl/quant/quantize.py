@@ -42,6 +42,15 @@ def qmul(real):
     return np.array([m for m, _ in ms], np.int32), np.array([s for _, s in ms], np.int32)
 
 
+def qbias(real_bias, scale):
+    """Float bias / (s_in * s_w) -> int32 (C2 bias add). Raises if a value does not fit int32
+    (a cast would wrap silently; AUDIT-1 A1-08)."""
+    q = np.round(real_bias / scale)               # same arithmetic as before the check (bundles unchanged)
+    if q.size and (not np.all(np.isfinite(q)) or q.max() > np.iinfo(np.int32).max or q.min() < np.iinfo(np.int32).min):
+        raise ValueError(f"quantized bias out of int32 range: {q.min()}..{q.max()}")
+    return q.astype(np.int32)
+
+
 def amax(x, cfg: QuantConfig):
     a = np.abs(np.asarray(x, np.float64)).ravel()
     v = a.max() if cfg.calib == "max" else np.percentile(a, cfg.pct)
@@ -139,7 +148,7 @@ def build_bundle(W: dict, mcfg, calib_idx: np.ndarray, qc: QuantConfig | None = 
         else:
             q, sw = quant_w8(w)
             A[name + ".w"] = q
-        A[name + ".bias"] = np.round(bf / (s_in * sw)).astype(np.int32) if bf is not None \
+        A[name + ".bias"] = qbias(bf, s_in * sw) if bf is not None \
             else np.zeros(w.shape[1], np.int32)
         A[name + ".mult"], A[name + ".shift"] = qmul(s_in * sw / s_out)
         return sw
@@ -168,7 +177,7 @@ def build_bundle(W: dict, mcfg, calib_idx: np.ndarray, qc: QuantConfig | None = 
         else:
             q8, sw = quant_w8(w)
             A[hp + "c_attn.w"] = q8
-        A[hp + "c_attn.bias"] = np.round(W[p + "attn.c_attn.bias"] / (s1 * sw)).astype(np.int32)
+        A[hp + "c_attn.bias"] = qbias(W[p + "attn.c_attn.bias"], s1 * sw)
         A[hp + "c_attn.mult"], A[hp + "c_attn.shift"] = qmul(s1 * sw / s_qkv)
         # scores: int32 q.k  ->  int16 Q.8 log2 units (folds 1/sqrt(hs) and log2 e)
         real = sq * sk / math.sqrt(hs) * LOG2E * (1 << ops.SM_FRAC)

@@ -1,10 +1,12 @@
 SIM ?= icarus
-.PHONY: test-fast test-slow test-py test-rtl lint clean
+.PHONY: test-fast test-slow test-py test-rtl test-audit lint clean
 test-py:
 	python3 -m pytest -q tests/py -m "not slow"
 test-rtl:
 	SIM=$(SIM) python3 -m pytest -q tests/rtl -m "not slow"
 test-fast: test-py test-rtl
+test-audit:
+	python3 -m pytest -q tests/audit -m "not slow" -rxX
 test-slow:
 	SIM=$(SIM) python3 -m pytest -q -m slow
 lint:

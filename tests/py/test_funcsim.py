@@ -193,6 +193,15 @@ def test_funcsim_bounds_and_reserved_ops():
         sim.step(isa.C("SOFTMAX_ONLINE", first=1, last=0))
 
 
+@pytest.mark.parametrize("dh", [8, 24, 1])
+def test_funcsim_rejects_kv_append_dh_not_multiple_of_16(dh):
+    """vec_seq rejects KV_APPEND with dh % 16 != 0 (error 7); funcsim must too (AUDIT-1 A1-07)."""
+    sim = FuncSim(KV260)
+    with pytest.raises(SimError, match="multiple of 16"):
+        sim.step(isa.C("KV_APPEND", src_addr=0, dst_addr=0, pos=0, heads=2, dh=dh, ctx=8, rows=1, src_stride=4))
+    sim.step(isa.C("KV_APPEND", src_addr=0, dst_addr=0, pos=0, heads=2, dh=16, ctx=8, rows=1, src_stride=4))
+
+
 def test_funcsim_race_checker_catches_missing_wait():
     g = mlp_graph(100, 64, 40)
     params = make_synthetic_params(g, 1)

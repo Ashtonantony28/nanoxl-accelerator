@@ -316,6 +316,8 @@ class FuncSim:
             self.write(isa.ABUF, f["dst_addr"], lut[x], n)
         elif op == "KV_APPEND":
             H, dh, rows, ctx = f["heads"], f["dh"], f["rows"], f["ctx"]
+            if dh % 16:
+                raise SimError("KV_APPEND dh must be a multiple of 16 (vec_seq error 7)")
             src = self.read(isa.ABUF, f["src_addr"], H * dh, rows, _l(f["src_stride"]))
             if f["pos"] + rows > ctx:
                 raise SimError("KV_APPEND past ctx")

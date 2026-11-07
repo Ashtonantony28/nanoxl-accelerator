@@ -35,10 +35,17 @@ from .hwconfig import HwConfig, MiB
 
 ALIGN_DDR = 4096
 CH_WEIGHT, CH_ACT, CH_KV = 0, 1, 2
+# DMA channel assignment (ADR-005): the DMA engine is chan & 1. Each weight-panel DMA (WBUF) goes to
+# the channel that has moved fewer bytes so far in the program (CH_ALT), so the decode weight stream
+# is split over both AXI masters; activations use chan 1, parameters chan 0, KV loads K -> chan 2
+# (engine 0) and V -> chan 3 (engine 1). SyncBuilder may still move a LOAD to the other channel when
+# that avoids a cross-channel sync.
+CH_ALT = None
 
 # semaphore id for (producer queue, consumer queue)
 SEM = {(isa.Q_DMA, isa.Q_ARR): 0, (isa.Q_DMA, isa.Q_VEC): 1, (isa.Q_ARR, isa.Q_DMA): 2,
-       (isa.Q_ARR, isa.Q_VEC): 3, (isa.Q_VEC, isa.Q_DMA): 4, (isa.Q_VEC, isa.Q_ARR): 5}
+       (isa.Q_ARR, isa.Q_VEC): 3, (isa.Q_VEC, isa.Q_DMA): 4, (isa.Q_VEC, isa.Q_ARR): 5,
+       (isa.Q_DMA, isa.Q_DMA): 6}   # 6: DMA channel 0 <-> channel 1 ordering (ADR-005)
 
 
 class CompileError(RuntimeError):
@@ -126,68 +133,121 @@ class _Entry:
 
 
 class SyncBuilder:
+    """Emits work commands and inserts the SIGNAL/WAIT pairs their conflicts need.
+
+    Agents (ADR-005): 0 DMA channel 0, 1 ARRAY, 2 VEC, 3 DMA channel 1. Commands of one agent are
+    ordered by program order. A DMA command runs on channel ``chan & 1``; a DMA LOAD whose conflicts
+    with the other channel are not yet ordered is moved to that channel when that removes the need
+    for a sync, else it waits on a DMA -> DMA semaphore (SIGNAL after the conflicting command, WAIT
+    in front of this one: the DMA queue's SIGNAL covers both channels and its WAIT blocks both).
+    DMA_STORE is a fence across both channels. funcsim.check_hazards re-proves the result."""
+
+    NA = 4
+
     def __init__(self, ddr_base):
         self.ddr_base = ddr_base
         self.entries = []
-        self.qof = []      # queue of each work cmd
-        self.seq = []      # own sequence number in its queue
+        self.qof = []      # agent of each work cmd
+        self.seq = []      # own sequence number of its agent
         self.vc = []       # vector clock at completion
-        self.vcq = [np.zeros(3, np.int64) for _ in range(3)]
-        self.count = [0, 0, 0]
+        self.sigvc = []    # what a SIGNAL right after the cmd covers (DMA: both channels)
+        self.vcq = [np.zeros(self.NA, np.int64) for _ in range(self.NA)]
+        self.count = [0] * self.NA
         self.last_sig = {}
-        self.shadow = _Shadow(3)
+        self.shadow = _Shadow(self.NA)
         self.n_waits = 0
+        self.moved = 0     # DMA LOADs moved to the other channel
+
+    @staticmethod
+    def _queue(a):
+        return isa.Q_DMA if a == 3 else a
 
     def emit(self, c: isa.Cmd):
         isa.validate(c)
         isa.check_aligned(c)
         q = c.queue
         assert q != isa.Q_CTRL
-        vc = self.vcq[q].copy()
-        deps = {}
+        NA = self.NA
+        # latest conflicting command per agent (any agent; the own agent is filtered below)
+        raw = {}
         acc = []
         qof = np.asarray(self.qof, np.int64) if self.qof else np.zeros(0, np.int64)
         for (buf, wr, addr, rb, rows, stride) in accesses(c):
             blk = rect_blocks(addr, rb, rows, stride, self.ddr_base if buf == DDR else 0)
             sh = self.shadow.get(buf, int(blk.max()) + 1)
-            arrs = [sh[0][blk]] + ([sh[1 + p][blk] for p in range(3) if p != q] if wr else [])
+            arrs = [sh[0][blk]] + ([sh[1 + p][blk] for p in range(NA)] if wr else [])
             for arr in arrs:
                 ids = arr[arr >= 0]
                 if ids.size:
                     qs = qof[ids]
-                    for p in range(3):
-                        if p != q:
-                            m = ids[qs == p]
-                            if m.size:
-                                deps[p] = max(deps.get(p, -1), int(m.max()))
+                    for p in range(NA):
+                        m = ids[qs == p]
+                        if m.size:
+                            raw[p] = max(raw.get(p, -1), int(m.max()))
             acc.append((buf, blk, wr))
+        store = c.op == "DMA_STORE"
+
+        def after_engine_waits(ag, vc):
+            """vc once the WAITs on the ARRAY / VEC dependencies are in (they come first)."""
+            for p in (1, 2):
+                if p != ag and p in raw and self.seq[raw[p]] > vc[p]:
+                    vc = np.maximum(vc, self.sigvc[raw[p]])
+            return vc
+
+        if q == isa.Q_DMA:
+            a = 3 if c["chan"] & 1 else 0
+            if store:
+                base = np.maximum(self.vcq[0], self.vcq[3])
+            else:
+                def unordered(ag):
+                    o = 3 - ag
+                    return o in raw and self.seq[raw[o]] > after_engine_waits(ag, self.vcq[ag])[o]
+                if unordered(a) and not unordered(3 - a):
+                    a = 3 - a
+                    c = isa.Cmd(c.op, dict(c.f, chan=c["chan"] ^ 1), c.note)
+                    self.moved += 1
+                base = self.vcq[a]
+        else:
+            a = q
+            base = self.vcq[a]
+        vc = base.copy()
+        wvc = np.zeros(NA, np.int64)       # what this command's WAITs bring in
         e = _Entry(c)
-        for p, x in sorted(deps.items()):
-            if self.seq[x] <= vc[p]:
+        # ARRAY / VEC dependencies first: their signals may already order the other DMA channel
+        # (and of the two DMA channels the later command first: its SIGNAL covers the other)
+        for p, x in sorted(raw.items(), key=lambda px: (px[0] in (0, 3), -px[1] if px[0] in (0, 3) else px[0])):
+            if p == a or self.seq[x] <= vc[p]:
                 continue
-            sem = SEM[(p, q)]
+            sem = SEM[(self._queue(p), q)]
             assert self.last_sig.get(sem, -1) < x, "signal order invariant"
             self.last_sig[sem] = x
-            self.entries[x].signals.append(isa.C("SIGNAL", queue=p, sem=sem))
+            self.entries[x].signals.append(isa.C("SIGNAL", queue=self._queue(p), sem=sem))
             e.waits.append(isa.C("WAIT", queue=q, sem=sem, count=1))
             self.n_waits += 1
-            vc = np.maximum(vc, self.vc[x])
+            vc = np.maximum(vc, self.sigvc[x])
+            wvc = np.maximum(wvc, self.sigvc[x])
+        if q == isa.Q_DMA and e.waits:
+            # a DMA WAIT holds the whole DMA queue: later commands of the other channel see it too
+            self.vcq[3 - a] = np.maximum(self.vcq[3 - a], wvc)
         cid = len(self.entries)
-        self.count[q] += 1
-        vc[q] = self.count[q]
+        self.count[a] += 1
+        vc[a] = self.count[a]
         self.entries.append(e)
-        self.qof.append(q)
-        self.seq.append(self.count[q])
+        self.qof.append(a)
+        self.seq.append(self.count[a])
         self.vc.append(vc.copy())
-        self.vcq[q] = vc
+        self.vcq[a] = vc
+        if store:
+            self.vcq[3 - a] = vc.copy()
+        self.sigvc.append(np.maximum(self.vcq[0], self.vcq[3]) if q == isa.Q_DMA else vc.copy())
         for buf, blk, wr in acc:
             sh = self.shadow.get(buf, int(blk.max()) + 1)  # re-fetch: a later rect may have grown it
             if wr:
                 sh[0][blk] = cid
-                for p in range(3):
+                for p in range(NA):
                     sh[1 + p][blk] = -1
             else:
-                sh[1 + q][blk] = cid
+                sh[1 + a][blk] = cid
 
     def stream(self, end=True):
         out = []
@@ -443,6 +503,7 @@ class Compiler:
                     raise CompileError("sequence exceeds ctx")
         self.M, self.seqs = M, seqs
         self.sb = SyncBuilder(self.img.base)
+        self.ch_bytes = [0, 0]           # DMA bytes per channel so far (CH_ALT balances them)
         self.abuf = Arena(hw.abuf, "ABUF")
         self.wring = Ring(hw.wbuf, "WBUF")
         self.pring = Ring(hw.pbuf, "PBUF")
@@ -511,6 +572,8 @@ class Compiler:
 
     def emit(self, op, note="", **f):
         self.sb.emit(isa.C(op, note, **f))
+        if op in ("DMA_LOAD", "DMA_STORE"):
+            self.ch_bytes[f.get("chan", 0) & 1] += f.get("rows", 1) * f["row_bytes"]
 
     def _new_tensor(self, t):
         bits, width = self.g.tensors[t]
@@ -532,14 +595,19 @@ class Compiler:
         field limit): the DMA engine issues at most one burst per row and pays a realigner bubble per
         row, so many short rows are latency bound (docs/control.md §3, ADR-003)."""
         sp_contig = sp_stride == 0 or sp_stride * isa.LINE == row_bytes
+
+        def ch():
+            if chan is not CH_ALT:
+                return chan
+            return int(self.ch_bytes[1] < self.ch_bytes[0])
         if rows == 1 or (ddr_stride in (0, row_bytes) and sp_contig):
             n = rows * row_bytes
             for off in range(0, n, 65536):
                 rb = min(65536, n - off)
-                self.emit(op, chan=chan, sp_buf=sp_buf, sp_addr=sp_addr + off, ddr_addr=ddr_addr + off,
+                self.emit(op, chan=ch(), sp_buf=sp_buf, sp_addr=sp_addr + off, ddr_addr=ddr_addr + off,
                           rows=1, row_bytes=rb, ddr_stride=rb)
             return
-        self.emit(op, chan=chan, sp_buf=sp_buf, sp_addr=sp_addr, ddr_addr=ddr_addr, rows=rows,
+        self.emit(op, chan=ch(), sp_buf=sp_buf, sp_addr=sp_addr, ddr_addr=ddr_addr, rows=rows,
                   row_bytes=row_bytes, ddr_stride=ddr_stride, sp_stride=sp_stride)
 
     def _dma_dense(self, sp_buf, sp_addr, ddr_addr, n, chan=CH_WEIGHT):
@@ -616,13 +684,13 @@ class Compiler:
                     tile = self.aring.alloc(mtc * cs, pin=True)
                 w = self.wring.alloc(pn.nbytes)
                 if plan.wbits == 4:
-                    self._dma_dense(isa.WBUF, w, pn.ddr, pn.nbytes)
+                    self._dma_dense(isa.WBUF, w, pn.ddr, pn.nbytes, CH_ALT)
                     self.emit("GEMM_GS", gemv=gemv, accumulate=int(pn.k0 > 0), a_addr=a + m0 * sa + pn.k0,
                               w_addr=w, c_addr=tile, M=mtc, N=pn.ntp, K=pn.kc, a_stride=lines(sa),
                               c_stride=lines(cs), glog2=plan.glog2)
                 else:
                     rb = pn.nbytes // pn.kc
-                    self._dma("DMA_LOAD", CH_WEIGHT, isa.WBUF, w, pn.ddr, pn.kc, rb, rb, 0)
+                    self._dma("DMA_LOAD", CH_ALT, isa.WBUF, w, pn.ddr, pn.kc, rb, rb, 0)
                     self.emit("GEMM", gemv=gemv, accumulate=int(pn.k0 > 0), a_addr=a + m0 * sa + pn.k0,
                               w_buf=0, w_addr=w, c_addr=tile, M=mtc, N=pn.ntp, K=pn.kc, a_stride=lines(sa),
                               c_stride=lines(cs))
@@ -675,7 +743,7 @@ class Compiler:
                     ka = self.kring.alloc(t_tot * dh, pin=True)
                     va = self.kring.alloc(t_tot * dh, pin=True)
                     for kind, sp in ((0, ka), (1, va)):
-                        self._dma_dense(isa.KVBUF, sp, self.kv_ddr_addr(b, L, kind, h), t_tot * dh, CH_KV)
+                        self._dma_dense(isa.KVBUF, sp, self.kv_ddr_addr(b, L, kind, h), t_tot * dh, CH_KV | kind)
                 for r0 in range(0, n, tq):
                     tqc = min(tq, n - r0)
                     sc = self.aring.alloc(tqc * cs, pin=True)

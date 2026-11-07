@@ -1,9 +1,17 @@
 // dma_engine.sv -- DMA_LOAD / DMA_STORE engine: AXI4 master (128-bit) <-> scratchpad line port.
 //
-// Command port: the DMA queue's engine port (cmd_valid/cmd_ready + the 128-bit ISA word); one
-// command runs at a time and `done` pulses when it has fully completed (LOAD: every scratchpad
-// write accepted; STORE: every write response received), so a later command in the DMA queue
-// observes it (docs/isa.md §4).
+// Command port: one channel of the DMA queue's engine port (cmd_valid/cmd_ready + the 128-bit ISA
+// word). `done` pulses once per accepted command, in acceptance order, when the command has fully
+// completed (LOAD: every scratchpad write accepted; STORE: every write response received).
+//
+// Pipelining (SG10a, ADR-005): accepted commands are decoded into descriptors and pushed into two
+// in-order FIFOs of NCMD entries: the address stage (AR/AW issue) pops `aq` as soon as it has
+// issued the previous command's last burst, the data stage (realigner + scratchpad writes, or W
+// beats) works on the head of `rq` and pops it at `done`. So the next LOAD's ARs go out while
+// earlier LOADs' data is still landing; read data stays in order in the load FIFO, and the data
+// stage switches commands without draining the AXI side. A STORE is exclusive: it is accepted only
+// into an empty engine and nothing is accepted behind it, so a later LOAD sees an earlier STORE's
+// DDR data and a STORE sees every earlier LOAD's scratchpad writes (docs/isa.md §4).
 //
 // Geometry (docs/isa.md, docs/control.md §DMA): row r moves row_bytes bytes between DDR byte
 // address ddr_addr + r*ds and scratchpad byte address sp_addr + r*ss of buffer sp_buf, where
@@ -30,7 +38,8 @@ module dma_engine #(
     parameter int LDF   = 512,   // load data FIFO depth (power of two, >= MAXB)
     parameter int STF   = 16,    // store line FIFO depth (power of two)
     parameter int MAXRD = 4,
-    parameter int MAXWR = 4
+    parameter int MAXWR = 4,
+    parameter int NCMD  = 4      // commands in the engine (power of two >= 2); 1 command = no pipelining
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -121,17 +130,78 @@ module dma_engine #(
         .dma_store_sp_stride(f_ss_s));
     /* verilator lint_on PINMISSING */
 
-    // latched command
-    logic          active, st;
+    // ---------------- descriptors ----------------
+    localparam int DW  = 1 + 3 + 17 + 25 + 17 + 13 + AW + 21;
+    localparam int QD  = (NCMD < 2) ? 2 : NCMD;
+    localparam int QCB = $clog2(QD + 1);
+    logic          d_st;
+    logic [2:0]    d_buf;
+    logic [16:0]   d_rb, d_ss;
+    logic [24:0]   d_ds;
+    logic [12:0]   d_rows;
+    logic [AW-1:0] d_ddr;
+    logic [20:0]   d_sp;
+    always_comb begin
+        d_st   = f_is_store;
+        d_buf  = f_is_store ? f_buf_s : f_buf_l;
+        d_rb   = f_is_store ? f_rb_s : f_rb_l;
+        d_ds   = ((f_is_store ? f_ds_s : f_ds_l) == '0) ? 25'(d_rb) : {1'b0, (f_is_store ? f_ds_s : f_ds_l)};
+        d_ss   = ((f_is_store ? f_ss_s : f_ss_l) == '0) ? d_rb : {1'b0, f_is_store ? f_ss_s : f_ss_l, 4'b0};
+        d_rows = f_is_store ? f_rows_s : f_rows_l;
+        d_ddr  = AW'(f_is_store ? f_ddr_s : f_ddr_l);
+        d_sp   = f_is_store ? f_sp_s : f_sp_l;
+    end
+
+    logic           aq_valid, aq_pop, rq_valid, rq_pop, aq_in_ready, rq_in_ready, cmd_take;
+    logic [DW-1:0]  aq_data, rq_data;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [QCB-1:0] aq_count;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic [QCB-1:0] rq_count;
+
+    // address-stage descriptor (head of aq)
+    logic          q_st;
+    logic [16:0]   q_rb;
+    logic [24:0]   q_ds;
+    logic [12:0]   q_rows;
+    logic [AW-1:0] q_ddr;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [2:0]    q_buf_u;
+    logic [16:0]   q_ss_u;
+    logic [20:0]   q_sp_u;
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign {q_st, q_buf_u, q_rb, q_ds, q_ss_u, q_rows, q_ddr, q_sp_u} = aq_data;
+    // data-stage descriptor (head of rq)
+    logic          st;
     logic [2:0]    c_buf;
     logic [16:0]   c_rb;
     logic [24:0]   c_ds;
     logic [16:0]   c_ss;
+    logic [12:0]   c_rows;
+    logic [AW-1:0] c_ddr;
+    logic [20:0]   c_sp;
+    assign {st, c_buf, c_rb, c_ds, c_ss, c_rows, c_ddr, c_sp} = rq_data;
 
-    assign cmd_ready = !active;
-    assign busy      = active;
+    // a STORE only into an empty engine, nothing behind a STORE, at most NCMD commands
+    assign cmd_ready = rq_in_ready && aq_in_ready && 32'(rq_count) < NCMD &&
+                       (rq_count == '0 || (!f_is_store && !st));
+    assign cmd_take  = cmd_valid && cmd_ready;
+    assign busy      = rq_valid;
+
+    fifo_sync #(.W(DW), .DEPTH(QD)) u_aq (
+        .clk(clk), .rst_n(rst_n), .in_valid(cmd_take), .in_ready(aq_in_ready),
+        .in_data({d_st, d_buf, d_rb, d_ds, d_ss, d_rows, d_ddr, d_sp}),
+        .out_valid(aq_valid), .out_ready(aq_pop), .out_data(aq_data), .count(aq_count));
+    fifo_sync #(.W(DW), .DEPTH(QD)) u_rq (
+        .clk(clk), .rst_n(rst_n), .in_valid(cmd_take), .in_ready(rq_in_ready),
+        .in_data({d_st, d_buf, d_rb, d_ds, d_ss, d_rows, d_ddr, d_sp}),
+        .out_valid(rq_valid), .out_ready(rq_pop), .out_data(rq_data), .count(rq_count));
 
     // ---------------- address loop (AR for loads, AW for stores) ----------------
+    logic          a_act;       // a descriptor is loaded in the address stage
+    logic          a_st;
+    logic [16:0]   a_rb;
+    logic [24:0]   a_ds;
     logic [12:0]   a_rows;      // rows left to issue
     logic [AW-1:0] a_row;       // DDR byte address of the current row
     logic          a_inrow;     // current row's beats are being issued
@@ -157,12 +227,70 @@ module dma_engine #(
         a_burst = 9'(m);
     end
 
+    logic          wl_in_ready;
     logic a_room;
-    assign a_room  = st ? (32'(wr_out) < MAXWR && wl_in_ready)
-                        : (32'(rd_out) < MAXRD && 32'(ld_resv) + 32'(a_burst) <= LDF);
-    assign a_issue = active && a_inrow && !ax_pending && !quiesce && a_room;
+    assign a_room  = a_st ? (32'(wr_out) < MAXWR && wl_in_ready)
+                          : (32'(rd_out) < MAXRD && 32'(ld_resv) + 32'(a_burst) <= LDF);
+    assign a_issue = a_act && a_inrow && !ax_pending && !quiesce && a_room;
+    assign aq_pop  = !a_act && aq_valid;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            a_act      <= 1'b0;
+            a_rows     <= '0;
+            a_inrow    <= 1'b0;
+            ax_pending <= 1'b0;
+            m_axi_arvalid <= 1'b0;
+            m_axi_awvalid <= 1'b0;
+        end else begin
+            if (aq_pop) begin
+                a_act   <= 1'b1;
+                a_st    <= q_st;
+                a_rb    <= q_rb;
+                a_ds    <= q_ds;
+                a_rows  <= q_rows;
+                a_row   <= q_ddr;
+                a_inrow <= 1'b0;
+            end
+            // start the next row; the stage frees once the command's last row is issued
+            if (a_act && !a_inrow) begin
+                if (a_rows != '0) begin
+                    a_inrow <= 1'b1;
+                    a_addr  <= {a_row[AW-1:4], 4'b0};
+                    a_left  <= 13'((18'(a_row[3:0]) + 18'(a_rb) + 18'd15) >> 4);
+                    a_rows  <= a_rows - 1'b1;
+                    a_row   <= a_row + AW'(a_ds);
+                end else begin
+                    a_act <= 1'b0;
+                end
+            end
+            if (a_issue) begin
+                ax_pending <= 1'b1;
+                if (a_st) begin
+                    m_axi_awvalid <= 1'b1;
+                    m_axi_awaddr  <= a_addr;
+                    m_axi_awlen   <= 8'(a_burst - 9'd1);
+                end else begin
+                    m_axi_arvalid <= 1'b1;
+                    m_axi_araddr  <= a_addr;
+                    m_axi_arlen   <= 8'(a_burst - 9'd1);
+                end
+                a_addr <= a_addr + (AW'(a_burst) << 4);
+                a_left <= a_left - 13'(a_burst);
+                if (a_left == 13'(a_burst)) a_inrow <= 1'b0;
+            end
+            if (m_axi_arvalid && m_axi_arready) begin m_axi_arvalid <= 1'b0; ax_pending <= 1'b0; end
+            if (m_axi_awvalid && m_axi_awready) begin m_axi_awvalid <= 1'b0; ax_pending <= 1'b0; end
+        end
+    end
+
+    assign m_axi_arid = '0;  assign m_axi_arsize = 3'd4; assign m_axi_arburst = 2'b01;
+    assign m_axi_arlock = 1'b0; assign m_axi_arcache = 4'b0011; assign m_axi_arprot = 3'b000;
+    assign m_axi_awid = '0;  assign m_axi_awsize = 3'd4; assign m_axi_awburst = 2'b01;
+    assign m_axi_awlock = 1'b0; assign m_axi_awcache = 4'b0011; assign m_axi_awprot = 3'b000;
 
     // ---------------- realign / row-consumer loop ----------------
+    logic          r_ld;        // the data stage holds the head of rq
     logic [12:0]   c_left;      // rows left to move through the realigner
     logic [AW-1:0] r_ddr;       // DDR byte address of the realigner's row
     logic [20:0]   r_sp;        // scratchpad byte address of the realigner's row
@@ -197,70 +325,9 @@ module dma_engine #(
     logic [$clog2(STF+1)-1:0] sf_count;
     logic [3:0]    wl_count;
     /* verilator lint_on UNUSEDSIGNAL */
-    logic          wl_in_ready, wl_out_valid, wl_out_ready;
+    logic          wl_out_valid, wl_out_ready;
     logic [7:0]    wl_out_len;
     logic [7:0]    w_beat;
-
-    logic cmd_take;
-    assign cmd_take = cmd_valid && cmd_ready;
-
-    // ---------------- command latch + address loop ----------------
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            active     <= 1'b0;
-            a_rows     <= '0;
-            a_inrow    <= 1'b0;
-            ax_pending <= 1'b0;
-            m_axi_arvalid <= 1'b0;
-            m_axi_awvalid <= 1'b0;
-        end else begin
-            if (cmd_take) begin
-                logic [16:0] rb;
-                st     <= f_is_store;
-                c_buf  <= f_is_store ? f_buf_s : f_buf_l;
-                rb      = f_is_store ? f_rb_s : f_rb_l;
-                c_rb   <= rb;
-                c_ds   <= ((f_is_store ? f_ds_s : f_ds_l) == '0) ? 25'(rb) : {1'b0, (f_is_store ? f_ds_s : f_ds_l)};
-                c_ss   <= ((f_is_store ? f_ss_s : f_ss_l) == '0) ? rb : {1'b0, f_is_store ? f_ss_s : f_ss_l, 4'b0};
-                active <= 1'b1;
-                a_rows <= f_is_store ? f_rows_s : f_rows_l;
-                a_row  <= AW'(f_is_store ? f_ddr_s : f_ddr_l);
-                a_inrow <= 1'b0;
-            end else if (done) begin
-                active <= 1'b0;
-            end
-            // start the next row of the address loop
-            if (active && !a_inrow && a_rows != '0 && !cmd_take) begin
-                a_inrow <= 1'b1;
-                a_addr  <= {a_row[AW-1:4], 4'b0};
-                a_left  <= 13'((18'(a_row[3:0]) + 18'(c_rb) + 18'd15) >> 4);
-                a_rows  <= a_rows - 1'b1;
-                a_row   <= a_row + AW'(c_ds);
-            end
-            if (a_issue) begin
-                ax_pending <= 1'b1;
-                if (st) begin
-                    m_axi_awvalid <= 1'b1;
-                    m_axi_awaddr  <= a_addr;
-                    m_axi_awlen   <= 8'(a_burst - 9'd1);
-                end else begin
-                    m_axi_arvalid <= 1'b1;
-                    m_axi_araddr  <= a_addr;
-                    m_axi_arlen   <= 8'(a_burst - 9'd1);
-                end
-                a_addr <= a_addr + (AW'(a_burst) << 4);
-                a_left <= a_left - 13'(a_burst);
-                if (a_left == 13'(a_burst)) a_inrow <= 1'b0;
-            end
-            if (m_axi_arvalid && m_axi_arready) begin m_axi_arvalid <= 1'b0; ax_pending <= 1'b0; end
-            if (m_axi_awvalid && m_axi_awready) begin m_axi_awvalid <= 1'b0; ax_pending <= 1'b0; end
-        end
-    end
-
-    assign m_axi_arid = '0;  assign m_axi_arsize = 3'd4; assign m_axi_arburst = 2'b01;
-    assign m_axi_arlock = 1'b0; assign m_axi_arcache = 4'b0011; assign m_axi_arprot = 3'b000;
-    assign m_axi_awid = '0;  assign m_axi_awsize = 3'd4; assign m_axi_awburst = 2'b01;
-    assign m_axi_awlock = 1'b0; assign m_axi_awcache = 4'b0011; assign m_axi_awprot = 3'b000;
 
     // ---------------- outstanding counters, errors ----------------
     logic rd_last_hs, b_hs, ld_pop;
@@ -279,7 +346,7 @@ module dma_engine #(
         end else begin
             rd_out  <= rd_out + RB'(m_axi_arvalid && m_axi_arready) - RB'(rd_last_hs);
             wr_out  <= wr_out + WB'(m_axi_awvalid && m_axi_awready) - WB'(b_hs);
-            ld_resv <= ld_resv + ((a_issue && !st) ? LB'(a_burst) : '0) - LB'(ld_pop);
+            ld_resv <= ld_resv + ((a_issue && !a_st) ? LB'(a_burst) : '0) - LB'(ld_pop);
             if (m_axi_rvalid && m_axi_rresp[1]) err <= 1'b1;
             if (b_hs && m_axi_bresp[1])         err <= 1'b1;
         end
@@ -297,10 +364,14 @@ module dma_engine #(
         .in_data(m_axi_rdata), .out_valid(ld_out_valid), .out_ready(ld_out_ready),
         .out_data(ld_out_data), .count(ld_count));
 
+    // the data stage takes the head descriptor one cycle after it reaches the head of rq
+    logic r_load;
+    assign r_load = rq_valid && !r_ld;
+
     // ---------------- store: scratchpad line reads ----------------
     logic sp_req_hs;
     assign sp_req_hs  = sp_arvalid && sp_arready;
-    assign sp_arvalid = active && st && s_inrow && (32'(st_resv) < STF);
+    assign sp_arvalid = r_ld && st && s_inrow && (32'(st_resv) < STF);
     assign sp_arbuf   = c_buf;
     assign sp_araddr  = s_line;
     always_ff @(posedge clk) begin
@@ -309,11 +380,11 @@ module dma_engine #(
             s_inrow <= 1'b0;
             st_resv <= '0;
         end else begin
-            if (cmd_take) begin
-                s_rows  <= f_is_store ? f_rows_s : '0;
-                s_row   <= f_sp_s;
+            if (r_load) begin
+                s_rows  <= st ? c_rows : '0;
+                s_row   <= c_sp;
                 s_inrow <= 1'b0;
-            end else if (active && st && !s_inrow && s_rows != '0) begin
+            end else if (r_ld && st && !s_inrow && s_rows != '0) begin
                 s_inrow <= 1'b1;
                 s_line  <= s_row[20:4];
                 s_left  <= 13'((18'(s_row[3:0]) + 18'(c_rb) + 18'd15) >> 4);
@@ -337,7 +408,7 @@ module dma_engine #(
     // ---------------- realigner row loop ----------------
     assign ra_in_off  = st ? r_sp[3:0] : r_ddr[3:0];
     assign ra_out_off = st ? r_ddr[3:0] : r_sp[3:0];
-    assign r_start    = active && !r_busy && c_left != '0 && !cmd_take;
+    assign r_start    = r_ld && !r_busy && c_left != '0;
 
     dma_realign u_ra (
         .clk(clk), .rst_n(rst_n), .start(r_start), .in_off(ra_in_off), .out_off(ra_out_off),
@@ -348,16 +419,20 @@ module dma_engine #(
 
     assign ra_in_valid  = st ? sf_out_valid : ld_out_valid;
     assign ra_in_data   = st ? sf_out_data  : ld_out_data;
-    assign sf_out_ready = st && ra_in_ready;
-    assign ld_out_ready = !st && ra_in_ready;
+    assign sf_out_ready = r_ld && st && ra_in_ready;
+    assign ld_out_ready = r_ld && !st && ra_in_ready;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
+            r_ld   <= 1'b0;
             c_left <= '0;
-        end else if (cmd_take) begin
-            c_left <= f_is_store ? f_rows_s : f_rows_l;
-            r_ddr  <= AW'(f_is_store ? f_ddr_s : f_ddr_l);
-            r_sp   <= f_is_store ? f_sp_s : f_sp_l;
+        end else if (r_load) begin
+            r_ld   <= 1'b1;
+            c_left <= c_rows;
+            r_ddr  <= c_ddr;
+            r_sp   <= c_sp;
+        end else if (rq_pop) begin
+            r_ld   <= 1'b0;
         end else if (r_start) begin
             r_line_base <= r_sp[20:4];
         end else if (r_done_row) begin
@@ -370,7 +445,7 @@ module dma_engine #(
     assign bytes       = c_rb;
 
     // load: realigner -> scratchpad writes
-    assign sp_wvalid = !st && ra_out_valid;
+    assign sp_wvalid = r_ld && !st && ra_out_valid;
     assign sp_wbuf   = c_buf;
     assign sp_waddr  = r_line_base + 17'(ra_idx);
     assign sp_wdata  = ra_out_data;
@@ -381,7 +456,7 @@ module dma_engine #(
         .clk(clk), .rst_n(rst_n), .in_valid(m_axi_awvalid && m_axi_awready), .in_ready(wl_in_ready),
         .in_data(m_axi_awlen), .out_valid(wl_out_valid), .out_ready(wl_out_ready),
         .out_data(wl_out_len), .count(wl_count));
-    assign m_axi_wvalid = st && ra_out_valid && wl_out_valid;
+    assign m_axi_wvalid = r_ld && st && ra_out_valid && wl_out_valid;
     assign m_axi_wdata  = ra_out_data;
     assign m_axi_wstrb  = ra_strb;
     assign m_axi_wlast  = (w_beat == wl_out_len);
@@ -393,9 +468,11 @@ module dma_engine #(
     assign ra_out_ready = st ? (wl_out_valid && m_axi_wready) : sp_wready;
 
     // ---------------- completion ----------------
-    // all rows through the realigner, all address bursts issued, all write responses back
-    assign done = active && !cmd_take && c_left == '0 && !r_busy && a_rows == '0 && !a_inrow &&
-                  !ax_pending && (st ? (wr_out == '0 && !wl_out_valid) : (rd_out == '0));
+    // LOAD: every row through the realigner (all its data arrived, so its bursts are complete).
+    // STORE (alone in the engine): also every AW issued and every write response back.
+    assign done   = r_ld && c_left == '0 && !r_busy &&
+                    (!st || (!a_act && !aq_valid && !ax_pending && wr_out == '0 && !wl_out_valid));
+    assign rq_pop = done;
 
 `ifndef SYNTHESIS
     always_ff @(posedge clk) begin

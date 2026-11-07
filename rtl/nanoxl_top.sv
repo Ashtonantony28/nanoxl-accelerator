@@ -12,8 +12,8 @@
 //                                          spad router (buffer id) + 5 x buf_spad
 //                                          ABUF  WBUF  ACC  PBUF  KVBUF  (NB banks each)
 //
-// External ports: AXI4-Lite CSR slave, AXI4 read master `mf_axi` (command fetch), AXI4 master
-// `md_axi` (DMA), `irq`. Buffer capacities are parameters in 16-byte lines (powers of two);
+// External ports: AXI4-Lite CSR slave, AXI4 read master `mf_axi` (command fetch), AXI4 masters
+// `md_axi` (DMA channel 0) and `md1_axi` (DMA channel 1, SG10a / ADR-005), `irq`. Buffer capacities are parameters in 16-byte lines (powers of two);
 // line addresses wrap at the capacity. Buffer ids 5..7 read zeros and drop writes (the
 // decoders reject them before they get here).
 //
@@ -80,7 +80,7 @@ module nanoxl_top #(
     input  logic               mf_axi_rlast,
     input  logic               mf_axi_rvalid,
     output logic               mf_axi_rready,
-    // ---- DMA AXI4 master ----
+    // ---- DMA channel 0 AXI4 master ----
     output logic [3:0]         md_axi_awid,
     output logic [AW-1:0]      md_axi_awaddr,
     output logic [7:0]         md_axi_awlen,
@@ -115,7 +115,43 @@ module nanoxl_top #(
     input  logic [1:0]         md_axi_rresp,
     input  logic               md_axi_rlast,
     input  logic               md_axi_rvalid,
-    output logic               md_axi_rready
+    output logic               md_axi_rready,
+    // ---- DMA channel 1 AXI4 master (SG10a, ADR-005) ----
+    output logic [3:0]         md1_axi_awid,
+    output logic [AW-1:0]      md1_axi_awaddr,
+    output logic [7:0]         md1_axi_awlen,
+    output logic [2:0]         md1_axi_awsize,
+    output logic [1:0]         md1_axi_awburst,
+    output logic               md1_axi_awlock,
+    output logic [3:0]         md1_axi_awcache,
+    output logic [2:0]         md1_axi_awprot,
+    output logic               md1_axi_awvalid,
+    input  logic               md1_axi_awready,
+    output logic [127:0]       md1_axi_wdata,
+    output logic [15:0]        md1_axi_wstrb,
+    output logic               md1_axi_wlast,
+    output logic               md1_axi_wvalid,
+    input  logic               md1_axi_wready,
+    input  logic [3:0]         md1_axi_bid,
+    input  logic [1:0]         md1_axi_bresp,
+    input  logic               md1_axi_bvalid,
+    output logic               md1_axi_bready,
+    output logic [3:0]         md1_axi_arid,
+    output logic [AW-1:0]      md1_axi_araddr,
+    output logic [7:0]         md1_axi_arlen,
+    output logic [2:0]         md1_axi_arsize,
+    output logic [1:0]         md1_axi_arburst,
+    output logic               md1_axi_arlock,
+    output logic [3:0]         md1_axi_arcache,
+    output logic [2:0]         md1_axi_arprot,
+    output logic               md1_axi_arvalid,
+    input  logic               md1_axi_arready,
+    input  logic [3:0]         md1_axi_rid,
+    input  logic [127:0]       md1_axi_rdata,
+    input  logic [1:0]         md1_axi_rresp,
+    input  logic               md1_axi_rlast,
+    input  logic               md1_axi_rvalid,
+    output logic               md1_axi_rready
 );
     localparam int APL  = (N + 15) / 16;              // array A port lines per beat
     localparam int WPL  = (N + 15) / 16;              // array W port lines per beat
@@ -126,11 +162,11 @@ module nanoxl_top #(
     localparam int NBA  = (NB > 0) ? NB : ((PMAX <= 1) ? 2 : (PMAX <= 2) ? 4 : (PMAX <= 4) ? 8 : 16);
     localparam int NSAT = 5;
 
-    // read ports: 0 DMA, 1 array A, 2 array W, 3 array ACC, 4 VEC A, 5 VEC B, 6 VEC P
-    // write ports: 0 DMA, 1 array ACC, 2 VEC D
-    localparam int NR = 7, NW = 3;
-    localparam logic [NR*8-1:0] RPL = {8'(VP), 8'(VP), 8'(VP), 8'(CPL), 8'(WPL), 8'(APL), 8'd1};
-    localparam logic [NW*8-1:0] WPLV = {8'(VP), 8'(CPL), 8'd1};
+    // read ports: 0 DMA ch0, 1 array A, 2 array W, 3 array ACC, 4 VEC A, 5 VEC B, 6 VEC P, 7 DMA ch1
+    // write ports: 0 DMA ch0, 1 array ACC, 2 VEC D, 3 DMA ch1
+    localparam int NR = 8, NW = 4;
+    localparam logic [NR*8-1:0] RPL = {8'd1, 8'(VP), 8'(VP), 8'(VP), 8'(CPL), 8'(WPL), 8'(APL), 8'd1};
+    localparam logic [NW*8-1:0] WPLV = {8'd1, 8'(VP), 8'(CPL), 8'd1};
 
     // ---------------------------------------------------------------- control plane
     logic               eng_clr, sat_clr;
@@ -140,6 +176,12 @@ module nanoxl_top #(
     logic [16:0]        sp_waddr, sp_araddr;
     logic [127:0]       sp_wdata, sp_rdata;
     logic [15:0]        sp_wstrb;
+    logic               sp1_wvalid, sp1_wready, sp1_arvalid, sp1_arready, sp1_rvalid;   // DMA channel 1
+    logic [2:0]         sp1_wbuf, sp1_arbuf;
+    logic [16:0]        sp1_waddr, sp1_araddr;
+    logic [127:0]       sp1_wdata, sp1_rdata;
+    logic [15:0]        sp1_wstrb;
+    logic               sp1_wv_raw;
     logic               arr_cmd_valid, arr_cmd_ready, arr_done, arr_err;
     logic               vec_cmd_valid, vec_cmd_ready, vec_done, vec_err;
     logic [127:0]       arr_cmd_word, vec_cmd_word;
@@ -172,9 +214,25 @@ module nanoxl_top #(
         .md_axi_arready(md_axi_arready), .md_axi_rid(md_axi_rid), .md_axi_rdata(md_axi_rdata),
         .md_axi_rresp(md_axi_rresp), .md_axi_rlast(md_axi_rlast), .md_axi_rvalid(md_axi_rvalid),
         .md_axi_rready(md_axi_rready),
+        .md1_axi_awid(md1_axi_awid), .md1_axi_awaddr(md1_axi_awaddr), .md1_axi_awlen(md1_axi_awlen),
+        .md1_axi_awsize(md1_axi_awsize), .md1_axi_awburst(md1_axi_awburst), .md1_axi_awlock(md1_axi_awlock),
+        .md1_axi_awcache(md1_axi_awcache), .md1_axi_awprot(md1_axi_awprot), .md1_axi_awvalid(md1_axi_awvalid),
+        .md1_axi_awready(md1_axi_awready), .md1_axi_wdata(md1_axi_wdata), .md1_axi_wstrb(md1_axi_wstrb),
+        .md1_axi_wlast(md1_axi_wlast), .md1_axi_wvalid(md1_axi_wvalid), .md1_axi_wready(md1_axi_wready),
+        .md1_axi_bid(md1_axi_bid), .md1_axi_bresp(md1_axi_bresp), .md1_axi_bvalid(md1_axi_bvalid),
+        .md1_axi_bready(md1_axi_bready),
+        .md1_axi_arid(md1_axi_arid), .md1_axi_araddr(md1_axi_araddr), .md1_axi_arlen(md1_axi_arlen),
+        .md1_axi_arsize(md1_axi_arsize), .md1_axi_arburst(md1_axi_arburst), .md1_axi_arlock(md1_axi_arlock),
+        .md1_axi_arcache(md1_axi_arcache), .md1_axi_arprot(md1_axi_arprot), .md1_axi_arvalid(md1_axi_arvalid),
+        .md1_axi_arready(md1_axi_arready), .md1_axi_rid(md1_axi_rid), .md1_axi_rdata(md1_axi_rdata),
+        .md1_axi_rresp(md1_axi_rresp), .md1_axi_rlast(md1_axi_rlast), .md1_axi_rvalid(md1_axi_rvalid),
+        .md1_axi_rready(md1_axi_rready),
         .sp_wvalid(sp_wvalid), .sp_wready(sp_wready), .sp_wbuf(sp_wbuf), .sp_waddr(sp_waddr),
         .sp_wdata(sp_wdata), .sp_wstrb(sp_wstrb), .sp_arvalid(sp_arvalid), .sp_arready(sp_arready),
         .sp_arbuf(sp_arbuf), .sp_araddr(sp_araddr), .sp_rvalid(sp_rvalid), .sp_rdata(sp_rdata),
+        .sp1_wvalid(sp1_wv_raw), .sp1_wready(sp1_wready), .sp1_wbuf(sp1_wbuf), .sp1_waddr(sp1_waddr),
+        .sp1_wdata(sp1_wdata), .sp1_wstrb(sp1_wstrb), .sp1_arvalid(sp1_arvalid), .sp1_arready(sp1_arready),
+        .sp1_arbuf(sp1_arbuf), .sp1_araddr(sp1_araddr), .sp1_rvalid(sp1_rvalid), .sp1_rdata(sp1_rdata),
         .arr_cmd_valid(arr_cmd_valid), .arr_cmd_ready(arr_cmd_ready), .arr_cmd_word(arr_cmd_word),
         .arr_done(arr_done), .arr_err(arr_err),
         .vec_cmd_valid(vec_cmd_valid), .vec_cmd_ready(vec_cmd_ready), .vec_cmd_word(vec_cmd_word),
@@ -222,8 +280,12 @@ module nanoxl_top #(
     logic [31:0]        st_hits, st_misses, st_lines;
     /* verilator lint_on UNUSEDSIGNAL */
 
-    // every DMA write into PBUF invalidates resident parameter blocks that cover the line
-    assign pb_snoop_valid = sp_wvalid && sp_wready && (sp_wbuf == 3'd3);
+    // every DMA write into PBUF invalidates resident parameter blocks that cover the line. The VEC
+    // engine has one snoop port, so DMA channel 1 writes PBUF only in cycles channel 0 does not.
+    logic dma0_pb;
+    assign dma0_pb        = sp_wvalid && (sp_wbuf == 3'd3);
+    assign sp1_wvalid     = sp1_wv_raw && !(dma0_pb && sp1_wbuf == 3'd3);
+    assign pb_snoop_valid = (dma0_pb && sp_wready) || (sp1_wvalid && sp1_wready && sp1_wbuf == 3'd3);
 
     vec_seq #(.L(L), .AW(17), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX), .NG(NG), .NSLOT(NSLOT),
               .NCTX(NCTX), .PL(VP)) u_vec (
@@ -238,7 +300,7 @@ module nanoxl_top #(
         .rp_rvalid(rp_rvalid), .rp_rdata(rp_rdata),
         .wd_valid(wd_valid), .wd_ready(wd_ready), .wd_buf(wd_buf), .wd_addr(wd_addr),
         .wd_data(wd_data), .wd_strb(wd_strb),
-        .pb_snoop_valid(pb_snoop_valid), .pb_snoop_line(sp_waddr),
+        .pb_snoop_valid(pb_snoop_valid), .pb_snoop_line(dma0_pb ? sp_waddr : sp1_waddr),
         .sat_clr(sat_clr), .sat_cnt(vec_sat),
         .st_hits(st_hits), .st_misses(st_misses), .st_lines(st_lines));
 
@@ -259,11 +321,11 @@ module nanoxl_top #(
     logic [NW*PMAX*128-1:0] wq_d;
     logic [NW*PMAX*16-1:0]  wq_s;
 
-    assign rq_v = {rp_arvalid, rb_arvalid, ra_arvalid, cr_arvalid, w_arvalid, a_arvalid, sp_arvalid};
-    assign rq_b = {3'd3, rb_arbuf, ra_arbuf, cr_arbuf, w_arbuf, a_arbuf, sp_arbuf};
-    assign rq_a = {rp_araddr, rb_araddr, ra_araddr, cr_araddr, w_araddr, a_araddr, sp_araddr};
-    assign {rp_arready, rb_arready, ra_arready, cr_arready, w_arready, a_arready, sp_arready} = rq_r;
-    assign {rp_rvalid, rb_rvalid, ra_rvalid, cr_rvalid, w_rvalid, a_rvalid, sp_rvalid} = rs_v;
+    assign rq_v = {sp1_arvalid, rp_arvalid, rb_arvalid, ra_arvalid, cr_arvalid, w_arvalid, a_arvalid, sp_arvalid};
+    assign rq_b = {sp1_arbuf, 3'd3, rb_arbuf, ra_arbuf, cr_arbuf, w_arbuf, a_arbuf, sp_arbuf};
+    assign rq_a = {sp1_araddr, rp_araddr, rb_araddr, ra_araddr, cr_araddr, w_araddr, a_araddr, sp_araddr};
+    assign {sp1_arready, rp_arready, rb_arready, ra_arready, cr_arready, w_arready, a_arready, sp_arready} = rq_r;
+    assign {sp1_rvalid, rp_rvalid, rb_rvalid, ra_rvalid, cr_rvalid, w_rvalid, a_rvalid, sp_rvalid} = rs_v;
     assign sp_rdata = rs_d[0*PMAX*128 +: 128];
     assign a_rdata  = rs_d[1*PMAX*128 +: APL*128];
     assign w_rdata  = rs_d[2*PMAX*128 +: WPL*128];
@@ -271,11 +333,12 @@ module nanoxl_top #(
     assign ra_rdata = rs_d[4*PMAX*128 +: VP*128];
     assign rb_rdata = rs_d[5*PMAX*128 +: VP*128];
     assign rp_rdata = rs_d[6*PMAX*128 +: VP*128];
+    assign sp1_rdata = rs_d[7*PMAX*128 +: 128];
 
-    assign wq_v = {wd_valid, cw_valid, sp_wvalid};
-    assign wq_b = {wd_buf, cw_buf, sp_wbuf};
-    assign wq_a = {wd_addr, cw_addr, sp_waddr};
-    assign {wd_ready, cw_ready, sp_wready} = wq_r;
+    assign wq_v = {sp1_wvalid, wd_valid, cw_valid, sp_wvalid};
+    assign wq_b = {sp1_wbuf, wd_buf, cw_buf, sp_wbuf};
+    assign wq_a = {sp1_waddr, wd_addr, cw_addr, sp_waddr};
+    assign {sp1_wready, wd_ready, cw_ready, sp_wready} = wq_r;
     always_comb begin
         wq_d = '0;
         wq_s = '0;
@@ -285,6 +348,8 @@ module nanoxl_top #(
         wq_s[1*PMAX*16 +: N*4]    = cw_strb;
         wq_d[2*PMAX*128 +: VP*128] = wd_data;
         wq_s[2*PMAX*16 +: VP*16]   = wd_strb;
+        wq_d[3*PMAX*128 +: 128]   = sp1_wdata;
+        wq_s[3*PMAX*16 +: 16]     = sp1_wstrb;
     end
 
     // five buffers; ids 5..7 = null buffer (reads return zeros one cycle later, writes dropped)

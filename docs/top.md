@@ -10,20 +10,22 @@ counts, greedy tokens = `golden_ref.json`).
 
 ```
  host ── AXI4-Lite s_axil ──► ctrl_top ── mf_axi (AXI4 read: command ring) ──► DDR
-                               │  csr_axil, cmd_fetch, cmd_proc (3 queues, semaphores), dma_engine ── md_axi (AXI4) ──► DDR
-                               │ arr_cmd/done/err      │ vec_cmd/done/err     │ sp_* (16-byte line port)
+                               │  csr_axil, cmd_fetch, cmd_proc (3 queues, semaphores), dma_engine ×2 ── md_axi, md1_axi (AXI4) ──► DDR
+                               │ arr_cmd/done/err      │ vec_cmd/done/err     │ sp_*, sp1_* (16-byte line ports, DMA ch0/ch1)
                                ▼                       ▼                      │
                           array_seq                 vec_seq                    │
                     (array_ctrl + systolic)   (vec_unit + SFU, pbuf_loader)    │
                      A  W  CR  CW               RA  RB  RP  WD   ◄─ pb_snoop ──┤ (DMA writes into PBUF)
                      └──┴──┴───┴──────────┬──────┴───┴───┴───┴─────────────────┘
-                              scratchpad router (by buffer id, 7 read + 3 write ports)
+                              scratchpad router (by buffer id, 8 read + 4 write ports)
                           ABUF   WBUF   ACC   PBUF   KVBUF      (buf_spad: NB line-interleaved banks each)
  irq ◄── ctrl_top (IRQ_STATUS & IRQ_EN)          eng_clr ──► array_seq.clr, vec_seq.clr     sat_clr ──► vec_seq
 ```
 
 External ports: AXI4-Lite CSR slave (`s_axil_*`, docs/control.md §5), AXI4 read master `mf_axi_*`
-(fetch), AXI4 master `md_axi_*` (DMA), `irq`. Both masters are 128-bit, 32-bit address, ID 0.
+(fetch), AXI4 masters `md_axi_*` (DMA ch0) and `md1_axi_*` (DMA ch1, SG10a / ADR-005), `irq`. All
+masters are 128-bit, 32-bit address, ID 0. Board ports (ADR-005 §4): KV260 `mf` → HPC0, `md` → HP0,
+`md1` → HP1; PYNQ-Z2 `md` → HP0, `md1` → HP1, `mf` shares HP0 through a 2:1 SmartConnect.
 
 | parameter | default | meaning |
 |---|---|---|
@@ -33,7 +35,7 @@ External ports: AXI4-Lite CSR slave (`s_axil_*`, docs/control.md §5), AXI4 read
 | `NB` | 0 (auto) | banks per buffer; auto = 2 × widest port, power of two (N ≤ 16: 8, N = 32: 16) |
 | `VP` | 4 | VEC engine port beat in 16-byte lines (A, B, P, D; `vec_seq.PL`, SG10b); 1 = the earlier 16-byte ports, cycle-identical |
 | `CTX_MAX`, `D_MAX`, `NG`, `NSLOT`, `NCTX` | 256, 384, 4, 16, 8 | vec_seq limits / parameter slots (shakespeare needs NG ≥ 6) |
-| `MAXB`, `LDF` | 256, 512 | DMA burst / load FIFO |
+| `MAXB`, `LDF` | 256, 512 | DMA burst / load FIFO (each DMA engine; `ctrl_top.NCMD` = 4 commands in flight per engine) |
 
 The test configuration of the compiler is `top_cocotb.top_hw(N, L, kv)`: KV260 timing knobs with the
 buffer capacities above.
@@ -42,9 +44,11 @@ buffer capacities above.
 
 * **Engines.** `arr_*` ↔ `array_seq`, `vec_*` ↔ `vec_seq` (docs/control.md §2). `arr_err`/`vec_err`
   (sticky) → ERR 7. `eng_clr` (soft reset) drives both engines' `clr`.
-* **PBUF snoop.** `pb_snoop_valid = sp_wvalid && sp_wready && sp_wbuf == PBUF`, `pb_snoop_line =
-  sp_waddr`: every DMA line accepted into PBUF invalidates resident LN / GELU / ctx / LUT blocks that
-  cover it (docs/sfu.md §10). The VEC engine snoops its own PBUF writes internally; the array never
+* **PBUF snoop.** Every DMA line accepted into PBUF, on either channel, invalidates resident LN / GELU
+  / ctx / LUT blocks that cover it (docs/sfu.md §10). The snoop port takes one line per cycle, so in a
+  cycle where ch0 offers a PBUF write, ch1's PBUF write is held back (`sp1_wvalid` masked):
+  `pb_snoop_valid = (dma0_pb && sp_wready) || (sp1_wvalid && sp1_wready && sp1_wbuf == PBUF)`,
+  `pb_snoop_line = dma0_pb ? sp_waddr : sp1_waddr`, with `dma0_pb = sp_wvalid && sp_wbuf == PBUF`. The VEC engine snoops its own PBUF writes internally; the array never
   writes PBUF.
 * **Saturation counters** (AUDIT-1 A1-02, canonical map). `vec_seq.sat_cnt` goes to `ctrl_top.sat_cnt`
   unchanged with `NSAT = 5`: SAT_0 requant, SAT_1 ALU, SAT_2 LN out, SAT_3 LN z, SAT_4 softmax score.
@@ -67,7 +71,8 @@ response backpressure):
 | 2 | array W (WBUF/KVBUF) | ceil(N/16) | | 2 | VEC D (`wd_*`) | VP (4) |
 | 3 | array ACC (`cr_*`) | N/4 | | | | |
 | 4, 5 | VEC A, B (any buffer) | VP (4) | | | | |
-| 6 | VEC P (PBUF) | VP (4) | | | | |
+| 6 | VEC P (PBUF) | VP (4) | | 3 | DMA ch1 (`sp1_w*`) | 1 |
+| 7 | DMA ch1 (`sp1_ar*`) | 1 | | | | |
 
 * **Routing.** The router sends each request to the buffer named by its id (ids 5–7: a null buffer
   that accepts, returns zeros, drops writes; the decoders reject such ids before they get here).
@@ -114,8 +119,8 @@ response backpressure):
 | SG2/SG7a | compiler `abase`, tile time | array_seq uses abase 0 / owns tiling |
 | SG4b | `cmd_gs` + scale beat, logits int16 | GEMM_GS path runs in the W4A8 tests; logits compared as int16 |
 | SG6 | DMA 16-byte line port → physical buffers | §3 |
-| SG6 | two AXI masters | `mf_axi` (fetch) + `md_axi` (DMA), both on the AxiRam in the bench |
-| SG6/SG4c | `chan` ignored, one DMA master (4 GB/s cap at KV260); DMA not pipelined | deferred (perf, SG10); measured costs in §6 |
+| SG6 | two AXI masters | three since SG10a: `mf_axi` (fetch) + `md_axi` / `md1_axi` (DMA ch0/ch1), all on one memory in the bench |
+| SG6/SG4c | `chan` ignored, one DMA master (4 GB/s cap at KV260); DMA not pipelined | **fixed (SG10a, ADR-005)**: two DMA engines by `chan[0]` on `md_axi` / `md1_axi`, up to 4 commands in flight each, SIGNALs carried on done; §6 |
 | SG6 | > 263 outstanding SIGNALs deadlock | compiler emits 1–2 (funcsim hazard check, SG4c) |
 | SG5/SG7b | SFU param slots from PBUF, LUT_LOAD | pbuf_loader; every program's LUT_LOAD / LN / GELU runs |
 | SG5 | LN needs L power of two | `L` is a power of two in every configuration |
@@ -181,9 +186,30 @@ exercised by the AxiRam). Prefill is now ARRAY + DMA bound at this size; the rem
 is the int32 softmax / REQUANT and the SFU per-row fixed costs (docs/vector-unit.md §9.3).
 
 Modelled KV260 shakespeare (N = 32, L = 64, 256-token prefill, `estimate(SHAKESPEARE, KV260)`): prefill
-17.6 → 14.7 ms, array utilization 0.66 → 0.78 (W8A8; W4A8 the same), decode unchanged (332 / 594 tok/s
-W8A8 / W4A8, single-DMA-master bound). The prefill critical path is 77 % GEMM, 8 % softmax (int32
+17.6 → 14.7 ms, array utilization 0.66 → 0.78 (W8A8; W4A8 the same), decode unchanged by SG10b (332 / 594
+tok/s W8A8 / W4A8, single-DMA-master bound; see below for SG10a). The prefill critical path is 77 % GEMM, 8 % softmax (int32
 scores at 16 per cycle), 7 % attention GEMMs, 4 % LN.
+
+### 6.1 Two DMA masters, pipelined DMA, carried SIGNALs (SG10a, ADR-005)
+
+Same programs and tables as above, on-chip KV, VP = 4. "Before" is main with SG10b and without SG10a
+(one master, one DMA command at a time, blocking SIGNALs). `TOP_AXI_LAT` = pipelined read latency in
+cycles on every read master (AR → first R beat; 75 cycles = the model's 300 ns DDR latency at 250 MHz):
+
+| bundle, AXI latency | prefill: before → after (model) | decode (pos 16..23): before → after (model) |
+|---|---|---|
+| W8A8, 75 cycles | 81,573 → 77,598 (−4.9 %; 79,088) | 70,783–70,895 → 63,319–63,431 (−10.5 %; 63,269–63,381) |
+| W4A8, 75 cycles | 85,628 → 83,266 (−2.8 %; 83,287) | 74,400–74,512 → 69,755–69,869 (−6.2 %; 69,760–69,872) |
+| W8A8, 0 (no stalls) | 80,098 → 76,394 (−4.6 %) | 66,104–66,216 → 61,923–62,035 (−6.3 %) |
+| W4A8, 0 (no stalls) | 84,342 → 82,598 (−2.1 %) | 71,958–72,070 → 68,730–68,842 (−4.5 %) |
+
+At 75 cycles the model matches the decode steps within 0.1 %. DMA busy in W8A8 decode falls
+61.9k → 50.9k cycles. Tiny at N = 16 is now array bound (ARRAY busy 54–57k of 63k cycles), so the
+measured gain is small. The large gain is at shakespeare scale, where decode streams 10.6 MB of INT8 weights
+per token. Modelled (`estimate(SHAKESPEARE, board)`, built timing vs `PRE_SG10A`): KV260 W8A8 decode
+332 → 619 tok/s (DDR weight bound 752), W4A8 594 → 651 (array bound); PYNQ-Z2 99 → 128 / 175 → 186.
+KV260 prefill 14.7 → 14.0 ms. The measurement runs are `TOP_AXI_LAT=75 TOP_PERF_DIR=<dir>
+SIM=verilator pytest tests/rtl/test_top.py -k "tiny and onchip and not vp1"`.
 
 ## 7. Lint
 

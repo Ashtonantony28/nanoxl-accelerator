@@ -58,12 +58,12 @@ module csr_axil #(
     input  logic                 all_idle,
     input  logic [2:0]           q_idle,
     input  logic [2:0]           eng_busy,
-    input  logic [2:0]           retire_inc,
+    input  logic [3:0]           retire_inc,
     input  logic [PW-1:0]        last_index,
     input  logic                 q_overflow,
     input  logic [7:0]           sem_val,
     input  logic                 dma_bytes_valid,
-    input  logic [16:0]          dma_bytes,
+    input  logic [17:0]          dma_bytes,       // both DMA channels (SG10a)
     input  logic [NSAT*32-1:0]   sat_cnt
 );
     localparam logic [31:0] ID_VALUE = 32'h4E58_4C43;   // "NXLC"

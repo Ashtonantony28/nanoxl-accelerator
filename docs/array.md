@@ -192,8 +192,8 @@ Resources (Yosys 0.33 `synth_xilinx`, `systolic_array` alone):
 
 | | N = 16 PACK 0 | N = 16 PACK 1 | N = 32 PACK 0 | N = 32 PACK 1 |
 |---|---|---|---|---|
-| KV260 (xcup) LUT / FF / DSP | 11,260 / 21,870 / 256 | 12,028 / 24,054 / **128** | see docs/fpga.md §2.3 | |
-| PYNQ-Z2 (xc7) LUT / FF / DSP | 3,068 / 13,678 / 256 | 12,028 / 24,054 / 256 | | |
+| KV260 (xcup) LUT / FF / DSP | 11,260 / 21,870 / 256 | 12,028 / 24,054 / **128** | 44,540 / 88,782 / 1,024 | 47,612 / 97,742 / **512** |
+| PYNQ-Z2 (xc7) LUT / FF / DSP | 3,068 / 13,678 / 256 | 12,028 / 24,054 / 256 | – | – |
 
 On the 7 series the DSP48E1 multiplier is 25×18, too narrow for the 27-bit packed operand,
 so packing saves nothing there and costs the psum adders the DSP48E1 otherwise absorbs:

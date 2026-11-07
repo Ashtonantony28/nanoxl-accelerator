@@ -475,8 +475,7 @@ class Compiler:
             addr, stride = self._new_tensor(t)
             bits, width = g.tensors[t]
             rb = width * bits // 8
-            self.emit("DMA_LOAD", chan=CH_ACT, sp_buf=isa.ABUF, sp_addr=addr, ddr_addr=self.io_addr[t],
-                      rows=M, row_bytes=rb, ddr_stride=rb, sp_stride=lines(stride))
+            self._dma("DMA_LOAD", CH_ACT, isa.ABUF, addr, self.io_addr[t], M, rb, rb, lines(stride))
         for i, op in enumerate(g.ops):
             getattr(self, "_lower_" + op.kind)(op)
             for t in frees[i]:
@@ -487,8 +486,7 @@ class Compiler:
                 addr, stride = self.env[t]
                 bits, width = g.tensors[t]
                 rb = width * bits // 8
-                self.emit("DMA_STORE", chan=CH_ACT, sp_buf=isa.ABUF, sp_addr=addr, ddr_addr=self.io_addr[t],
-                          rows=M, row_bytes=rb, ddr_stride=rb, sp_stride=lines(stride))
+                self._dma("DMA_STORE", CH_ACT, isa.ABUF, addr, self.io_addr[t], M, rb, rb, lines(stride))
         cmds = self.sb.stream()
         if len(cmds) * isa.WORD_BYTES > self.img.regions["cmd_ring"][1]:
             raise CompileError("command ring overflow")
@@ -528,11 +526,24 @@ class Compiler:
             self.abuf.free(self.env.pop(t)[0])
         return self._new_tensor(t)
 
+    def _dma(self, op, chan, sp_buf, sp_addr, ddr_addr, rows, row_bytes, ddr_stride, sp_stride):
+        """Emit one DMA. When both sides are contiguous (ddr_stride and the scratchpad stride equal
+        row_bytes) the rows are coalesced into single-row commands of up to 64 KiB (the row_bytes
+        field limit): the DMA engine issues at most one burst per row and pays a realigner bubble per
+        row, so many short rows are latency bound (docs/control.md §3, ADR-003)."""
+        sp_contig = sp_stride == 0 or sp_stride * isa.LINE == row_bytes
+        if rows == 1 or (ddr_stride in (0, row_bytes) and sp_contig):
+            n = rows * row_bytes
+            for off in range(0, n, 65536):
+                rb = min(65536, n - off)
+                self.emit(op, chan=chan, sp_buf=sp_buf, sp_addr=sp_addr + off, ddr_addr=ddr_addr + off,
+                          rows=1, row_bytes=rb, ddr_stride=rb)
+            return
+        self.emit(op, chan=chan, sp_buf=sp_buf, sp_addr=sp_addr, ddr_addr=ddr_addr, rows=rows,
+                  row_bytes=row_bytes, ddr_stride=ddr_stride, sp_stride=sp_stride)
+
     def _dma_dense(self, sp_buf, sp_addr, ddr_addr, n, chan=CH_WEIGHT):
-        for off in range(0, n, 65536):
-            rb = min(65536, n - off)
-            self.emit("DMA_LOAD", chan=chan, sp_buf=sp_buf, sp_addr=sp_addr + off, ddr_addr=ddr_addr + off,
-                      rows=1, row_bytes=rb, ddr_stride=rb)
+        self._dma("DMA_LOAD", chan, sp_buf, sp_addr, ddr_addr, 1, n, n, 0)
 
     def _load_param(self, name, nbytes=None, pin=True):
         addr, size = self.blob[name] if name in self.blob else (self.lin[name].param_ddr, None)
@@ -611,17 +622,15 @@ class Compiler:
                               c_stride=lines(cs), glog2=plan.glog2)
                 else:
                     rb = pn.nbytes // pn.kc
-                    self.emit("DMA_LOAD", chan=CH_WEIGHT, sp_buf=isa.WBUF, sp_addr=w, ddr_addr=pn.ddr,
-                              rows=pn.kc, row_bytes=rb, ddr_stride=rb, sp_stride=0)
+                    self._dma("DMA_LOAD", CH_WEIGHT, isa.WBUF, w, pn.ddr, pn.kc, rb, rb, 0)
                     self.emit("GEMM", gemv=gemv, accumulate=int(pn.k0 > 0), a_addr=a + m0 * sa + pn.k0,
                               w_buf=0, w_addr=w, c_addr=tile, M=mtc, N=pn.ntp, K=pn.kc, a_stride=lines(sa),
                               c_stride=lines(cs))
                 if pn.k0 + pn.kc == plan.K:
                     if direct:
                         rbo = 4 * plan.N
-                        self.emit("DMA_STORE", chan=CH_ACT, sp_buf=isa.ACC, sp_addr=tile,
-                                  ddr_addr=self.io_addr[out_name] + m0 * rbo + 4 * pn.n0, rows=mtc,
-                                  row_bytes=4 * pn.ntc, ddr_stride=rbo, sp_stride=lines(cs))
+                        self._dma("DMA_STORE", CH_ACT, isa.ACC, tile, self.io_addr[out_name] + m0 * rbo + 4 * pn.n0,
+                                  mtc, 4 * pn.ntc, rbo, lines(cs))
                     else:
                         self.emit("REQUANT", note=op.param, out16=int(ob == 2), src_addr=tile,
                                   dst_addr=dst + m0 * ds + pn.n0 * ob, param_addr=pa + REQ_REC * pn.n0,
@@ -654,9 +663,8 @@ class Compiler:
             else:
                 for kind in (0, 1):
                     for h in range(H):
-                        self.emit("DMA_STORE", chan=CH_KV, sp_buf=isa.ABUF, sp_addr=src + (1 + kind) * d + h * dh,
-                                  ddr_addr=self.kv_ddr_addr(b, L, kind, h) + pos * dh, rows=n, row_bytes=dh,
-                                  ddr_stride=dh, sp_stride=lines(sq))
+                        self._dma("DMA_STORE", CH_KV, isa.ABUF, src + (1 + kind) * d + h * dh,
+                                  self.kv_ddr_addr(b, L, kind, h) + pos * dh, n, dh, dh, lines(sq))
             cs = rup(4 * t_tot, isa.LINE)
             ps = rup(t_tot, isa.LINE)
             tq = max(1, min(n, (hw.acc // 4) // cs))

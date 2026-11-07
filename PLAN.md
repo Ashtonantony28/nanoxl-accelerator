@@ -19,6 +19,6 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 | SG8 | M6 | Folded into SG7c (C5 chose full-row softmax; KV modes already in compiler). Online softmax would need a new ADR. | — | merged into SG7c |
 | SG9a | M7 | FPGA flow without hardware: Vivado TCL (KV260 block design, PYNQ-Z2 variant), constraints, overlay packaging; Yosys synth_xilinx resource estimates per board config | `pytest tests/fpga` | wave 5 |
 | SG10a | M8 | Second DMA master on a second HP port (`chan`), DMA command pipelining; measured decode gain | `pytest tests/rtl -k "dma or ctrl or top"` | wave 5 |
-| SG10b | M8 | 64-byte (4-line) VEC engine ports + banked buffer port widening; measured prefill gain | `pytest tests/rtl -k "vec_seq or top"` | wave 5 |
+| SG10b | M8 | 64-byte (4-line) VEC engine ports + banked buffer port widening; measured prefill gain | `pytest tests/rtl -k "vec_seq or top"` | done (vec_seq PL / nanoxl_top VP = 4; PL=1 cycle-exact; tiny prefill −10 % W8A8 / −12 % W4A8 measured; KV260 shakespeare prefill 17.6 → 14.7 ms modelled; docs/vector-unit.md §9.3, docs/top.md §6) |
 | SG9 | M7 | Vivado project for KV260, timing, PYNQ driver (sim-checked; board run needs hardware) | | wave 4 |
 | SG10 | M8 | INT4 path, batching, perf; AUDIT-2 | | wave 4 |

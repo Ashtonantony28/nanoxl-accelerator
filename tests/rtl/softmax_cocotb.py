@@ -22,6 +22,8 @@ CTX = env_int("CTX_MAX", 256)
 N_ROWS = env_int("N_ROWS", 300)
 N_GOLDEN = env_int("N_GOLDEN", 400)      # golden score rows to replay (0 = all)
 NCTX = env_int("NCTX", 8)
+RQL = env_int("RQL", L)                 # score requant lanes
+R = L // RQL                            # cycles per int32 input beat
 INPUTS = ["in_valid", "in_data", "in_keep", "in_last", "in_rq", "in_slot", "in_nkeep",
           "out_ready", "lut_we", "lut_waddr", "lut_wdata", "ctx_we", "ctx_slot", "ctx_data",
           "sat_clr"]
@@ -340,12 +342,12 @@ async def softmax_rq_golden(dut):
 
 @cocotb.test()
 async def softmax_rq_full_rate(dut):
-    """Requant rows at full rate: 3*nb + 19 cycles per row."""
+    """Requant rows at full rate: (R+2)*nb + 19 cycles per row (R = L/RQL, 3*nb + 19 unshared)."""
     await start(dut, INPUTS)
     await load(dut)
     rng = random.Random(19)
     rows = [rand_rq_row(rng) for _ in range(10)]
     cyc = await run_rows(dut, rows, 1.0, 1.0, 14)
-    budget = sum(3 * nb(len(r["x"])) + 19 for r in rows)
+    budget = sum((R + 2) * nb(len(r["x"])) + 19 for r in rows)
     dut._log.info(f"L={L}: {len(rows)} requant rows in {cyc} cycles (model {budget})")
     assert budget - 2 <= cyc <= budget + 2, (cyc, budget)

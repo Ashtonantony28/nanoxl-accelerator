@@ -1417,8 +1417,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 1175,
-     "occ": 1171,
+     "first": 1223,
+     "occ": 1219,
      "f": {
       "first": 1,
       "last": 1,
@@ -1438,8 +1438,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 390,
-     "occ": 388,
+     "first": 438,
+     "occ": 436,
      "f": {
       "first": 1,
       "last": 1,
@@ -1459,8 +1459,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 123,
-     "occ": 121,
+     "first": 126,
+     "occ": 124,
      "f": {
       "first": 1,
       "last": 1,
@@ -1480,8 +1480,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 375,
-     "occ": 373,
+     "first": 422,
+     "occ": 421,
      "f": {
       "first": 1,
       "last": 1,
@@ -1501,8 +1501,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 180,
-     "occ": 178,
+     "first": 186,
+     "occ": 184,
      "f": {
       "first": 1,
       "last": 1,
@@ -1846,7 +1846,7 @@
      "L": 64,
      "lat": 2,
      "first": 29,
-     "occ": 27,
+     "occ": 26,
      "f": {
       "src_addr": 36880,
       "dst_addr": 1359568,
@@ -1863,7 +1863,7 @@
      "op": "KV_APPEND",
      "L": 64,
      "lat": 2,
-     "first": 499,
+     "first": 498,
      "occ": 497,
      "f": {
       "src_addr": 100512,
@@ -3333,8 +3333,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 620,
-     "occ": 616,
+     "first": 713,
+     "occ": 709,
      "f": {
       "first": 1,
       "last": 1,
@@ -3354,8 +3354,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 375,
-     "occ": 373,
+     "first": 423,
+     "occ": 421,
      "f": {
       "first": 1,
       "last": 1,
@@ -3375,8 +3375,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 63,
-     "occ": 61,
+     "first": 66,
+     "occ": 64,
      "f": {
       "first": 1,
       "last": 1,
@@ -3396,8 +3396,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 371,
-     "occ": 370,
+     "first": 420,
+     "occ": 418,
      "f": {
       "first": 1,
       "last": 1,
@@ -3417,8 +3417,8 @@
      "op": "SOFTMAX_ONLINE",
      "L": 64,
      "lat": 2,
-     "first": 126,
-     "occ": 124,
+     "first": 147,
+     "occ": 145,
      "f": {
       "first": 1,
       "last": 1,
@@ -3475,7 +3475,7 @@
      "L": 64,
      "lat": 2,
      "first": 420,
-     "occ": 418,
+     "occ": 417,
      "f": {
       "in16": 0,
       "src_addr": 23408,
@@ -3579,7 +3579,7 @@
      "L": 64,
      "lat": 2,
      "first": 28,
-     "occ": 26,
+     "occ": 25,
      "f": {
       "src_addr": 42384,
       "dst_addr": 283280,
@@ -3779,7 +3779,7 @@
      "op": "KV_APPEND",
      "L": 64,
      "lat": 2,
-     "first": 207,
+     "first": 208,
      "occ": 205,
      "f": {
       "src_addr": 100512,
@@ -3797,7 +3797,7 @@
      "op": "KV_APPEND",
      "L": 64,
      "lat": 2,
-     "first": 27,
+     "first": 28,
      "occ": 26,
      "f": {
       "src_addr": 11712,

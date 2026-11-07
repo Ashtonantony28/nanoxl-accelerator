@@ -96,12 +96,12 @@ VEC_CAL = {
     1: {
         4: dict(vec=13, gelu=21, kv=12, rq_chunk=25, rq_row=1, ln=(0, 0, 18, 17), sm=(0, 0, 18, 17)),
         16: dict(vec=14, gelu=23, kv=13, rq_chunk=26, rq_row=1, ln=(0, 0, 18, 21), sm=(2, 0, 18, 23)),
-        64: dict(vec=17, gelu=26, kv=16, rq_chunk=29, rq_row=1, ln=(6, 0, 15, 36), sm=(4, 10, 17, 46)),
+        64: dict(vec=17, gelu=26, kv=15, rq_chunk=29, rq_row=1, ln=(6, 0, 15, 36), sm=(7, 7, 20, 47)),
     },
     4: {   # nanoxl_top as built (VP = 4)
         4: dict(vec=13, gelu=21, kv=13, rq_chunk=24, rq_row=1, ln=(0, 0, 18, 17), sm=(0, 0, 18, 17)),
         16: dict(vec=12, gelu=21, kv=12, rq_chunk=25, rq_row=1, ln=(0, 0, 18, 17), sm=(0, 0, 18, 17)),
-        64: dict(vec=14, gelu=23, kv=14, rq_chunk=26, rq_row=1, ln=(0, 0, 18, 20), sm=(6, 0, 18, 23)),
+        64: dict(vec=14, gelu=23, kv=14, rq_chunk=26, rq_row=1, ln=(0, 0, 18, 20), sm=(0, 0, 21, 23)),
     },
 }
 RQ_MAX = 256       # vec_seq REQUANT column chunk (record buffer)

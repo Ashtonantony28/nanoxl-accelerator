@@ -344,20 +344,20 @@ then PL = 4 (L = 4, 16, 64).
 | REQUANT M16 N256 pt | 1065 | 1067 | 1070 | 1065 | 298 | 299 |
 | REQUANT M4 N64 | 157 | 158 | 161 | 109 | 61 | 62 |
 | REQUANT M1 N65 | 108 | 109 | 112 | 60 | 48 | 49 |
-| SOFTMAX rows16 cols256 | 3393 | 1768 | 1171 | 3393 | 1089 | 616 |
-| SOFTMAX rows16 cols64 | 1089 | 616 | 388 | 1089 | 513 | 373 |
-| SOFTMAX rows1 cols256 | 228 | 133 | 121 | 228 | 84 | 61 |
-| SOFTMAX rows16 cols16 | 513 | 373 | 373 | 513 | 368 | 370 |
-| SOFTMAX rows4 cols128 causal | 477 | 268 | 178 | 477 | 189 | 124 |
+| SOFTMAX rows16 cols256 | 3393 | 1768 | 1219 | 3393 | 1089 | 709 |
+| SOFTMAX rows16 cols64 | 1089 | 616 | 436 | 1089 | 513 | 421 |
+| SOFTMAX rows1 cols256 | 228 | 133 | 124 | 228 | 84 | 64 |
+| SOFTMAX rows16 cols16 | 513 | 373 | 421 | 513 | 368 | 418 |
+| SOFTMAX rows4 cols128 causal | 477 | 268 | 184 | 477 | 189 | 145 |
 | LN rows1 cols128 | 132 | 69 | 63 | 131 | 60 | 45 |
 | LN rows16 cols128 | 1857 | 804 | 483 | 1856 | 704 | 420 |
-| LN rows16 cols128 in8 | 1857 | 706 | 475 | 1857 | 705 | 418 |
+| LN rows16 cols128 in8 | 1857 | 706 | 475 | 1857 | 705 | 417 |
 | LN rows1 cols384 | 324 | 133 | 115 | 323 | 107 | 61 |
 | LN rows16 cols384 | 4929 | 1828 | 1315 | 4928 | 1472 | 676 |
 | LN rows1 cols128 miss | 183 | 121 | 115 | 184 | 111 | 97 |
 | LN rows16 cols128 miss | 1909 | 856 | 535 | 1909 | 756 | 472 |
 | GELU len512 | 151 | 56 | 59 | 151 | 54 | 32 |
-| GELU len128 | 54 | 32 | 35 | 54 | 30 | 26 |
+| GELU len128 | 54 | 32 | 35 | 54 | 30 | 25 |
 | GELU len2048 | 535 | 152 | 155 | 534 | 151 | 56 |
 | GELU len512 miss | 168 | 74 | 77 | 168 | 73 | 50 |
 | VEC ADD int8 len2048 | 526 | 143 | 146 | 525 | 142 | 47 |
@@ -367,7 +367,7 @@ then PL = 4 (L = 4, 16, 64).
 | VEC ADD int8 len128 | 45 | 23 | 26 | 46 | 22 | 17 |
 | VEC ADD int8 len64 | 30 | 19 | 22 | 30 | 17 | 16 |
 | KV_APPEND rows16 heads4 dh32 | 589 | 206 | 207 | 588 | 204 | 142 |
-| KV_APPEND rows1 heads4 dh32 | 48 | 25 | 27 | 49 | 24 | 22 |
+| KV_APPEND rows1 heads4 dh32 | 48 | 25 | 26 | 49 | 24 | 22 |
 | KV_APPEND rows16 heads6 dh64 | 1645 | 494 | 497 | 1644 | 493 | 205 |
 | KV_APPEND rows1 heads6 dh64 | 115 | 44 | 47 | 115 | 43 | 26 |
 | LUT_LOAD hit | 6 | 6 | 6 | 6 | 6 | 6 |

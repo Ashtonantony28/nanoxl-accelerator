@@ -7,6 +7,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: sudo apt-get update && sudo apt-get install -y iverilog
-      - run: pip install numpy pytest cocotb cocotbext-axi
+      - run: sudo apt-get update && sudo apt-get install -y iverilog yosys
+      - run: pip install numpy pytest cocotb cocotbext-axi z3-solver
       - run: make test-fast SIM=icarus

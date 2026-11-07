@@ -262,6 +262,7 @@ def test_resource_estimates_current(board):
     assert f.is_file(), f"run python3 fpga/yosys/estimate.py {board}"
     res = json.loads(f.read_text())
     assert res["params"] == boards.RTL_PARAMS[board]
-    assert set(res["blocks"]) >= {"ctrl_top", "array_seq", "vec_seq", "glue"}
+    assert set(res["blocks"]) >= {"ctrl_top", "array_seq", "vec_seq", "spad_router", "glue"}
+    assert not res.get("failed"), res.get("failed")
     for k in ("LUT", "FF", "DSP", "BRAM36", "URAM"):
         assert k in res["utilization"]

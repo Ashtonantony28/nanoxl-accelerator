@@ -108,7 +108,12 @@ def blocks(params: dict) -> list[tuple]:
 
     out = [("ctrl_top", "ctrl_top", dict(AW=params.get("AW", 32), IDW=4, MAXB=params["MAXB"], LDF=params["LDF"],
                                          NSAT=5), 1, ()),
-           ("array_seq", "array_seq", dict(N=N, M_DEPTH=params["M_DEPTH"]), 1, ()),
+           # array_seq at N=32 runs Yosys out of memory (13 GB) in memory_libmap on its wide RAMs, so its
+           # three array_ctrl memories are separate jobs: accumulator (M_DEPTH x 32N), output FIFO, group-scale FIFO
+           ("array_seq", "array_seq", dict(N=N, M_DEPTH=params["M_DEPTH"]), 1, ("scratchpad", "spad_fifo")),
+           ("arr_acc_ram", "scratchpad", dict(WIDTH=32 * N, DEPTH=params["M_DEPTH"], RD_LAT=1), 1, ()),
+           ("arr_out_fifo", "spad_fifo", dict(W=32 * N + 1, DEPTH=2 * N + 8), 1, ()),
+           ("arr_gs_fifo", "spad_fifo", dict(W=8 * N, DEPTH=N + 4), 1, ()),
            ("vec_seq", "vec_seq", dict(L=params["L"], AW=17, CTX_MAX=params["CTX_MAX"], D_MAX=params["D_MAX"],
                                        NG=params["NG"], NSLOT=params["NSLOT"], NCTX=params["NCTX"]), 1, ()),
            ("spad_router", "buf_spad", dict(LINES=params["ACC_LINES"], NB=nb, NR=7, NW=3, PMAX=pmax, RPL=hexv(rpl),
@@ -140,8 +145,10 @@ def _synth_job(job):
     ys.write_text(script)
     t0 = time.time()
     with open(work / f"{name}.log", "w") as log:
-        subprocess.run(["yosys", "-s", str(ys)], check=True, stdout=log, stderr=subprocess.STDOUT)
+        rc = subprocess.run(["yosys", "-s", str(ys)], stdout=log, stderr=subprocess.STDOUT).returncode
     secs = time.time() - t0
+    if rc != 0:                       # e.g. killed for memory: report the block as missing, keep going
+        return name, secs, None
     meta.write_text(f"{secs:.1f}")
     return name, secs, stat.read_text()
 
@@ -158,7 +165,12 @@ def run(board: str, params: dict, write: bool = True, tag: str = "", jobs: int =
         done = list(ex.map(_synth_job, [(n, m, p, bb, work, files, FAMILY[board]) for n, m, p, _, bb in bl]))
     wall = time.time() - t0
     per_block, totals = {}, {}
+    failed = []
     for (name, secs, text), (_, module, prm, mult, bbox) in zip(done, bl):
+        if text is None:
+            failed.append(name)
+            per_block[name] = {"module": module, "count": mult, "runtime_s": round(secs, 1), "failed": True}
+            continue
         mods, hier = parse_stat(text)
         if not hier:                               # a leaf module: its own counts
             hier = next(iter(mods.values()))
@@ -181,7 +193,7 @@ def run(board: str, params: dict, write: bool = True, tag: str = "", jobs: int =
            "command": f"synth_xilinx {' '.join(FAMILY[board])}, per block (hierarchical), summed",
            "params": params, "runtime_s": round(wall, 1), "cpu_s": round(sum(b["runtime_s"] for b in per_block.values()), 1),
            "jobs": jobs, "totals": tot, "utilization": util,
-           "blocks": per_block}
+           "blocks": per_block, "failed": failed}
     if write:
         out = ROOT / "bench" / "results" / f"resources_{board}.json"
         out.write_text(json.dumps(res, indent=1) + "\n")
@@ -204,6 +216,9 @@ def main(argv=None):
     res = run(a.board, params, write=not (a.no_write or over or only), tag=tag, jobs=a.jobs, only=only)
     print(f"{a.board}: {res['runtime_s']} s wall")
     for n, b in res["blocks"].items():
+        if b.get("failed"):
+            print(f"  {n:16s} FAILED after {b['runtime_s']} s (see sim_build/fpga/{a.board}{tag}/{n}.log)")
+            continue
         print(f"  {n:16s} x{b['count']:<3} {b['runtime_s']:7.1f} s  " +
               " ".join(f"{k}={b[k]}" for k in ("LUT", "FF", "DSP", "BRAM36", "BRAM18", "URAM", "LUTRAM") if k in b))
     for k, u in res["utilization"].items():

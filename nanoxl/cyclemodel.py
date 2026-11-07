@@ -18,9 +18,18 @@ Per-command costs (cycles; N = array size, L = vector lanes, B = DDR bytes/cycle
            the leading wl is hidden when the GEMM starts back to back with the previous GEMM
            (double-buffered PE weight registers preload across commands)
            lat = 2N (N in GEMV mode, which bypasses skew/deskew)
+  GEMM_GS  as an int4 GEMM, plus one scale beat (N uint8 = two int4 weight rows of port bandwidth) on
+           the first K-tile of every group: that tile costs max(M, wl_s), wl_s = ceil((N + 2) / (2 rpc))
+           (ADR-004; the per-column uint8 x int32 multiply sits in the accumulator RMW stage, 0 cycles)
   VEC/GELU occ = ceil(len / L);  REQUANT occ = M ceil(N_out / L)
-  LN       occ = rows x 2 ceil(cols / L) + row latency;  SOFTMAX same with 3 passes
+  LN       C5 3-pass: occ = rows x (3 ceil(cols / L) + sfu_row_bubble) + row_latency_ln
+           (pass 1 sum, pass 2 sum of squares around mu, rsqrt, pass 3 normalize + affine)
+  SOFTMAX  C5 3-pass: occ = rows x (3 ceil(cols / L) + sfu_row_bubble) + row_latency_softmax
+           (pass 1 score requant + max, pass 2 exp2 + sum, recip, pass 3 normalize)
+  LUT_LOAD occ = 256 / 16 (16 entries per cycle into the SFU table RAM)
   KV_APPEND occ = rows x heads x ceil(dh / L)
+LN / SOFTMAX / LUT_LOAD are estimates (SG5 had not documented SFU timing when this was written):
+the per-row bubble covers the reduce-tree latency between passes that row interleaving cannot hide.
 """
 from __future__ import annotations
 
@@ -58,6 +67,20 @@ def cost(c: isa.Cmd, hw: HwConfig):
         occ = wl + tiles * max(M, wl)
         lat = hw.fill_drain or (na if f["gemv"] else 2 * na)
         return occ, lat, {"macs": M * N * K, "preload": wl}
+    if op == "GEMM_GS":
+        M, N, K = f["M"], f["N"], f["K"]
+        rpc = hw.wload_rows_per_cycle
+        wl, wl_s = _cd(na, 2 * rpc), _cd(na + 2, 2 * rpc)
+        G = isa.gs_group(f["glog2"])
+        kt = min(na, G)                       # the controller splits K-tiles at group boundaries
+        nct = _cd(N, na)
+        ktiles = _cd(K, kt)
+        gtiles = _cd(K, G)                    # tiles that carry a scale beat (first of each group)
+        occ = wl + nct * (gtiles * max(M, wl_s) + (ktiles - gtiles) * max(M, wl))
+        lat = hw.fill_drain or (na if f["gemv"] else 2 * na)
+        return occ, lat, {"macs": M * N * K, "preload": wl}
+    if op == "LUT_LOAD":
+        return isa.LUT_ENTRIES // 16, hw.vec_latency, {}
     if op == "ATTN_TILE":
         rows, ln = f["rows"], f["len"]
         occ = 2 * (_cd(ln, na) * 2 * max(rows, na))
@@ -69,9 +92,10 @@ def cost(c: isa.Cmd, hw: HwConfig):
     if op == "REQUANT":
         return f["M"] * _cd(f["N"], L), hw.vec_latency, {}
     if op == "LN":
-        return f["rows"] * 2 * _cd(f["cols"], L) + hw.row_latency_ln, hw.vec_latency, {}
+        return f["rows"] * (3 * _cd(f["cols"], L) + hw.sfu_row_bubble) + hw.row_latency_ln, hw.vec_latency, {}
     if op == "SOFTMAX_ONLINE":
-        return f["rows"] * 3 * _cd(f["cols"], L) + hw.row_latency_softmax, hw.vec_latency, {}
+        return (f["rows"] * (3 * _cd(f["cols"], L) + hw.sfu_row_bubble) + hw.row_latency_softmax,
+                hw.vec_latency, {})
     if op == "KV_APPEND":
         return f["rows"] * f["heads"] * _cd(f["dh"], L), hw.vec_latency, {}
     if op in ("WAIT", "SIGNAL", "IRQ", "END"):

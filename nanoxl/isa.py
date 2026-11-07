@@ -37,6 +37,8 @@ OPCODES = {
     "DMA_LOAD": 0x08, "DMA_STORE": 0x09,
     "GEMM": 0x10, "ATTN_TILE": 0x11,
     "VEC": 0x18, "REQUANT": 0x19, "LN": 0x1A, "SOFTMAX_ONLINE": 0x1B, "GELU": 0x1C, "KV_APPEND": 0x1D,
+    # added in ADR-004 (additive: new opcodes only, existing encodings unchanged)
+    "GEMM_GS": 0x12, "LUT_LOAD": 0x1E,
 }
 OP_NAMES = {v: k for k, v in OPCODES.items()}
 
@@ -44,7 +46,8 @@ OP_NAMES = {v: k for k, v in OPCODES.items()}
 OP_QUEUE = {
     "END": Q_CTRL, "IRQ": Q_CTRL,
     "DMA_LOAD": Q_DMA, "DMA_STORE": Q_DMA,
-    "GEMM": Q_ARR, "ATTN_TILE": Q_ARR,
+    "GEMM": Q_ARR, "ATTN_TILE": Q_ARR, "GEMM_GS": Q_ARR,
+    "LUT_LOAD": Q_VEC,
     "VEC": Q_VEC, "REQUANT": Q_VEC, "LN": Q_VEC, "SOFTMAX_ONLINE": Q_VEC, "GELU": Q_VEC, "KV_APPEND": Q_VEC,
 }
 
@@ -78,8 +81,34 @@ LAYOUTS: dict[str, list[tuple[str, int, str]]] = {
     "GELU": [("src_addr", 20, "u"), ("dst_addr", 20, "u"), ("lut_addr", 20, "u"), ("len", 20, "m1")],
     "KV_APPEND": [("src_addr", 20, "u"), ("dst_addr", 21, "u"), ("pos", 12, "u"), ("heads", 6, "m1"),
                   ("dh", 8, "m1"), ("ctx", 12, "m1"), ("rows", 12, "m1"), ("src_stride", 12, "u")],
+    # ADR-004: INT4 GEMM with per-(group, column) uint8 scales applied to each K-group partial sum.
+    "GEMM_GS": [("gemv", 1, "u"), ("accumulate", 1, "u"), ("a_addr", 20, "u"), ("w_addr", 21, "u"),
+                ("c_addr", 20, "u"), ("M", 12, "m1"), ("N", 12, "m1"), ("K", 12, "m1"),
+                ("a_stride", 10, "u"), ("c_stride", 10, "u"), ("glog2", 3, "u")],
+    # ADR-004: load one 256-entry uint16 SFU table (C5 lut.exp2 / lut.recip / lut.rsqrt) from PBUF.
+    "LUT_LOAD": [("table", 2, "u"), ("src_addr", 20, "u")],
 }
 LAYOUTS["DMA_STORE"] = LAYOUTS["DMA_LOAD"]
+
+# LUT_LOAD.table ids, GEMM_GS group size = 2^(glog2 + GS_LOG2_BASE)
+LUT_EXP2, LUT_RECIP, LUT_RSQRT = 0, 1, 2
+LUT_NAMES = {LUT_EXP2: "exp2", LUT_RECIP: "recip", LUT_RSQRT: "rsqrt"}
+LUT_ENTRIES = 256
+GS_LOG2_BASE = 3
+
+
+def gs_group(glog2: int) -> int:
+    return 1 << (glog2 + GS_LOG2_BASE)
+
+
+def gs_layout(K: int, N: int, glog2: int) -> tuple[int, int, int]:
+    """GEMM_GS operand block in WBUF: (packed-weight bytes, scale offset, total bytes).
+    Packed int4 W [K, N/2] (C1b) at w_addr, then gm uint8 [ceil(K/G), N] at w_addr + scale offset
+    (the weight part rounded up to a 16-byte line)."""
+    wb = K * N // 2
+    off = -(-wb // LINE) * LINE
+    G = gs_group(glog2)
+    return wb, off, off + -(-K // G) * N
 
 for _op, _fs in LAYOUTS.items():
     _bits = OPCODE_BITS + sum(w for _, w, _ in _fs)
@@ -169,6 +198,10 @@ def validate(cmd: Cmd) -> None:
                 raise IsaError(f"VEC.{b}={f[b]} is not a buffer")
         if f["dt_in"] not in DT_BYTES or f["dt_out"] not in DT_BYTES:
             raise IsaError("VEC dtype must be 0 (i8), 1 (i16) or 2 (i32)")
+    if op == "GEMM_GS" and f["N"] % 2:
+        raise IsaError("GEMM_GS: int4 needs even N (C1b packs two per byte along N)")
+    if op == "LUT_LOAD" and f["table"] not in LUT_NAMES:
+        raise IsaError(f"LUT_LOAD.table={f['table']} undefined")
     if op == "GEMM":
         if f["int4"] and f["w_trans"]:
             raise IsaError("GEMM: int4 weights cannot be transposed")
@@ -176,8 +209,36 @@ def validate(cmd: Cmd) -> None:
             raise IsaError("GEMM: int4 needs even N (C1b packs two per byte along N)")
 
 
-def encode(cmd: Cmd) -> bytes:
+# ---------------------------------------------------------------- alignment rule (docs/isa.md §3)
+# Scratchpad addresses that the RTL may treat as 16-byte line addresses. Every command the compiler
+# emits satisfies the rule; ``encode(..., aligned=True)`` and ``check_aligned`` enforce it. The bit
+# format itself still carries the low 4 bits (the decoder vectors exercise full field ranges), but a
+# command that violates the rule has undefined behaviour on hardware.
+ALIGNED_FIELDS = {
+    "DMA_LOAD": ("sp_addr", "ddr_addr"), "DMA_STORE": ("sp_addr", "ddr_addr"),
+    "GEMM": ("a_addr", "w_addr", "c_addr"), "GEMM_GS": ("a_addr", "w_addr", "c_addr"),
+    "ATTN_TILE": ("q_addr", "k_addr", "v_addr", "o_addr", "ctx_addr"),
+    "VEC": ("src0_addr", "src1_addr", "dst_addr"),
+    "REQUANT": ("src_addr", "dst_addr", "param_addr"),
+    "LN": ("src_addr", "dst_addr", "param_addr"),
+    "SOFTMAX_ONLINE": ("src_addr", "dst_addr", "ctx_addr"),
+    "GELU": ("src_addr", "dst_addr", "lut_addr"),
+    "KV_APPEND": ("src_addr", "dst_addr"),
+    "LUT_LOAD": ("src_addr",),
+}
+
+
+def check_aligned(cmd: Cmd) -> None:
+    """Raise IsaError unless every base address of ``cmd`` is a multiple of LINE (16 bytes)."""
+    for n in ALIGNED_FIELDS.get(cmd.op, ()):
+        if cmd.f[n] % LINE:
+            raise IsaError(f"{cmd.op}.{n}=0x{cmd.f[n]:x} is not {LINE}-byte aligned")
+
+
+def encode(cmd: Cmd, aligned: bool = False) -> bytes:
     validate(cmd)
+    if aligned:
+        check_aligned(cmd)
     word = OPCODES[cmd.op]
     pos = OPCODE_BITS
     for n, w, k in LAYOUTS[cmd.op]:
@@ -216,8 +277,8 @@ def decode(b: bytes) -> Cmd:
     return cmd
 
 
-def encode_stream(cmds) -> bytes:
-    return b"".join(encode(c) for c in cmds)
+def encode_stream(cmds, aligned: bool = False) -> bytes:
+    return b"".join(encode(c, aligned) for c in cmds)
 
 
 def decode_stream(b: bytes) -> list[Cmd]:

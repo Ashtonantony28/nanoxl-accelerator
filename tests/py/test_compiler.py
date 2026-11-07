@@ -171,7 +171,15 @@ def test_compiler_real_models_fit_isa_fields(cfg):
             isa.validate(c)
     dec = progs[-1]
     gemm_w = sum(c["K"] * c["N"] * (0.5 if c["int4"] else 1) for c in dec.cmds if c.op == "GEMM" and not c["w_buf"])
+    gemm_w += sum(c["K"] * c["N"] // 2 for c in dec.cmds if c.op == "GEMM_GS")
     assert gemm_w == pytest.approx(cfg.weight_bytes, rel=0.01)  # each weight streamed once per token
+    if cfg.wbits == 4:   # W4A8 blocks use GEMM_GS; group scales add K/64 x N bytes (1/32 of the INT4 weights)
+        gs = [c for c in dec.cmds if c.op == "GEMM_GS"]
+        assert gs and all(isa.gs_group(c["glog2"]) == 64 for c in gs)
+        scale_b = sum(isa.gs_layout(c["K"], c["N"], c["glog2"])[2] - c["K"] * c["N"] // 2 for c in gs)
+        assert scale_b == pytest.approx(cfg.block_params / 64, rel=0.02)
+    for pr in progs:
+        isa.encode_stream(pr.cmds, aligned=True)     # alignment rule holds for every emitted command
 
 
 def test_compiler_sync_regression_shadow_growth():

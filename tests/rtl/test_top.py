@@ -28,17 +28,33 @@ def _top(n, l, tag, **env):
 
 @VERILATOR_ONLY
 def test_top_smoke():
-    """Fast tier: one prefill step of a 2-token prompt on a 1-layer cut of tiny W8A8 (N=8, L=4), logits,
-    KV cache and per-op saturation counters bit-exact vs golden."""
-    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=0)
+    """Fast tier: prefill of a 2-token prompt + one decode step on a 1-layer cut of tiny W8A8 (N=8, L=4);
+    logits, KV cache and per-op saturation counters bit-exact vs golden. The compiler gets a 10 KiB PBUF
+    ring, so LN blocks of different layers reuse PBUF lines (the residency snoop must invalidate)."""
+    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1, TOP_PBUF_KB=10)
+
+
+@VERILATOR_ONLY
+def test_top_smoke_saturation():
+    """Fast tier: as test_top_smoke with lowered requant / LN shifts, so the requant, score, ALU (residual)
+    and LN clamps all fire; per-op counts and the SAT_0..4 CSRs must equal golden's."""
+    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1, TOP_STRESS=1, TOP_PBUF_KB=10)
 
 
 @pytest.mark.slow
 @VERILATOR_ONLY
-@pytest.mark.parametrize("bundle,kv", [("w8a8", "onchip"), ("w4a8", "onchip"), ("w8a8", "ddr")])
+@pytest.mark.parametrize("bundle,kv", [("w8a8", "onchip"), ("w4a8", "onchip"), ("w8a8", "ddr"), ("w4a8", "ddr")])
 def test_top_tiny(bundle, kv, tmp_path):
     """Headline: the 16-token reference prompt prefilled and 8 tokens greedily decoded by the real host
     driver on N=16, L=16; logits every step, KV cache, per-op saturation counters == golden; tokens ==
-    golden_ref.json. W8A8 and W4A8 (GEMM_GS) with the on-chip KV tier, W8A8 with the DDR KV mode."""
-    _top(16, 16, f"_tiny", TOP_BUNDLE=bundle, TOP_KV=kv, TOP_PROMPT=16, TOP_DECODE=8,
+    golden_ref.json. W8A8 and W4A8 (GEMM_GS), each with the on-chip KV tier and the DDR KV mode."""
+    _top(16, 16, "_tiny", TOP_BUNDLE=bundle, TOP_KV=kv, TOP_PROMPT=16, TOP_DECODE=8,
          TOP_PERF_JSON=os.environ.get("TOP_PERF_DIR", str(tmp_path)) + f"/perf_{bundle}_{kv}.json")
+
+
+@pytest.mark.slow
+@VERILATOR_ONLY
+def test_top_tiny_saturation():
+    """Full 4-layer W4A8 with lowered shifts (all clamps fire in every layer), 4-token prompt + 2 decode
+    steps, random AXI backpressure on every channel of both masters."""
+    _top(16, 16, "_tiny", TOP_BUNDLE="w4a8", TOP_PROMPT=4, TOP_DECODE=2, TOP_STRESS=1, TOP_P_AXI=0.3)

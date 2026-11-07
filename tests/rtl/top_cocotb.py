@@ -8,6 +8,7 @@ Environment (set by tests/rtl/test_top.py):
   TOP_BUNDLE w8a8 | w4a8      TOP_KV onchip | ddr       TOP_LAYERS 0 = all, else truncate the model
   TOP_PROMPT tokens of the reference prompt to prefill   TOP_DECODE greedy decode steps after it
   TOP_N, TOP_L array size / lanes (must equal the RTL parameters)   TOP_P_AXI random AXI stall prob.
+  TOP_STRESS 1 = lowered shifts (every clamp fires)      TOP_PBUF_KB compiler's PBUF ring size
   TOP_PERF_JSON optional path: measured vs modelled cycles are written there
 """
 from __future__ import annotations
@@ -47,17 +48,30 @@ def env(name, default):
     return type(default)(os.environ.get(name, default))
 
 
-def top_hw(n, l, kv_onchip):
-    """HwConfig the RTL test instance implements (nanoxl_top defaults: buffer capacities)."""
+def top_hw(n, l, kv_onchip, pbuf_kb=32):
+    """HwConfig the RTL test instance implements (nanoxl_top defaults: buffer capacities). A smaller
+    `pbuf_kb` makes the compiler's PBUF ring wrap inside a program, so different parameter blocks land
+    on the same PBUF lines (exercises the DMA -> VEC residency snoop)."""
     return KV260.with_(array_n=n, lanes=l, kv_onchip=kv_onchip, abuf=64 * KiB, wbuf=32 * KiB,
-                       acc=64 * KiB, pbuf=32 * KiB, kvbuf=128 * KiB)
+                       acc=64 * KiB, pbuf=pbuf_kb * KiB, kvbuf=128 * KiB)
 
 
-def truncated(arrays, meta, layers):
-    if not layers or layers >= meta["n_layer"]:
-        return arrays, meta
+def prepare(arrays, meta, layers, stress):
+    """Optionally cut the model to its first `layers` blocks, and (stress) lower requant / LN shifts so
+    that every saturating clamp of the hardware fires (golden and device run the same bundle)."""
     m = dict(meta)
-    m["n_layer"] = layers
+    if layers and layers < meta["n_layer"]:
+        m["n_layer"] = layers
+    if stress:
+        arrays = dict(arrays)
+        for l in range(m["n_layer"]):
+            for name, d in (("c_attn", 3), ("attn_proj", 3), ("c_fc", 3), ("score", 3), ("pv", 3)):
+                k = f"h{l}.{name}.shift"
+                arrays[k] = np.maximum(arrays[k] - d, 0).astype(arrays[k].dtype)
+            k = f"h{l}.ln_1.c"
+            arrays[k] = arrays[k].copy()
+            arrays[k][4] -= 4
+        arrays["lm_head.shift"] = np.maximum(arrays["lm_head.shift"] - 1, 0).astype(arrays["lm_head.shift"].dtype)
     return arrays, m
 
 
@@ -160,6 +174,7 @@ async def top_tiny(dut):
     bundle = env("TOP_BUNDLE", "w8a8")
     kv_mode = env("TOP_KV", "onchip")
     layers = env("TOP_LAYERS", 0)
+    stress = env("TOP_STRESS", 0)
     n_prompt = env("TOP_PROMPT", 16)
     n_dec = env("TOP_DECODE", 8)
     N, L = env("TOP_N", 8), env("TOP_L", 4)
@@ -195,12 +210,12 @@ async def top_tiny(dut):
     await ClockCycles(dut.clk, 4)
 
     A, meta = load_bundle(TINY / f"{bundle}.npz")
-    A, meta = truncated(A, meta, layers)
-    hw = top_hw(N, L, kv_mode == "onchip")
+    A, meta = prepare(A, meta, layers, stress)
+    hw = top_hw(N, L, kv_mode == "onchip", env("TOP_PBUF_KB", 32))
     be = RtlBackend(dut, axil, mem, PHYS)
     mon = VecMonitor(dut)
     prompt = REF["prompt"][:n_prompt]
-    full = not layers or layers >= 4
+    full = (not layers or layers >= 4) and not stress
     ref_tokens = REF["bundles"][bundle]["tokens"] if full and n_prompt == len(REF["prompt"]) else None
 
     def host():
@@ -275,6 +290,8 @@ async def top_tiny(dut):
     sat = {k: v for k, v in sat.items() if v}
     log.info("saturation per op: rtl %s golden %s", sat, gs)
     assert sat == gs, (sat, gs)
+    if stress:
+        assert all(sat.get(k) for k in ("h0.c_attn", "h0.attn_proj", "h0.score", "h0.pv", "resid", "h0.ln_1")), sat
     cs = res["csr_sat"]
     last = mon.snaps[-1] if mon.snaps else [0] * 5
     tot = {"requant": last[0] + last[4], "alu": last[1], "ln_z": last[3], "ln_out": last[2], "score": last[4]}

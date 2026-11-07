@@ -11,7 +11,7 @@ SIM = os.environ.get("SIM", "icarus")
 
 def test_wrap_smoke():
     """Same configuration and checks as test_top_smoke (Icarus: prefill only, ~90 s; Verilator: + 1 decode)."""
-    env = {"TOP_N": "8", "TOP_L": "4", "TOP_BUNDLE": "w8a8", "TOP_LAYERS": "1", "TOP_PROMPT": "2",
+    env = {"TOP_N": "8", "TOP_L": "4", "TOP_VP": "4", "TOP_BUNDLE": "w8a8", "TOP_LAYERS": "1", "TOP_PROMPT": "2",
            "TOP_DECODE": str(int(SIM == "verilator")), "TOP_PBUF_KB": "10"}
-    run("nanoxl_axi_wrap", TOP_SRC + ["rtl/nanoxl_axi_wrap.v"], "wrap_cocotb", parameters={"N": 8, "L": 4},
+    run("nanoxl_axi_wrap", TOP_SRC + ["rtl/nanoxl_axi_wrap.v"], "wrap_cocotb", parameters={"N": 8, "L": 4, "VP": 4},
         extra_env=env, tag="_smoke")

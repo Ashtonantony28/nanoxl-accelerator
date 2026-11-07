@@ -17,7 +17,7 @@ module ctrl_top #(
     parameter int MAXOUT = 4,
     parameter int MAXB   = 256,
     parameter int LDF    = 512,
-    parameter int NSAT   = 4
+    parameter int NSAT   = 5
 ) (
     input  logic               clk,
     input  logic               rst_n,

@@ -8,7 +8,7 @@ contiguous DDR buffer shared with the PL.
   counting semaphores (SIGNAL stalls at 255), END / IRQ barriers that raise IRQ_STATUS bits and keep
   dispatching when tail has moved past them, halt on an illegal word with ERR_CODE / ERR_INDEX /
   ERR_W0..3, W1C IRQ_STATUS, single step, soft reset, perf counters (cycle counts from
-  nanoxl.cyclemodel over the dispatched words) and the four saturation counters.
+  nanoxl.cyclemodel over the dispatched words) and the five saturation counters.
 """
 from __future__ import annotations
 
@@ -251,9 +251,10 @@ class SimBackend(Backend):
         tot0, z0 = sum(sc.values()), sc.get("ln_z", 0)
         self.fs.step(c)
         d, dz = sum(sc.values()) - tot0, sc.get("ln_z", 0) - z0
-        unit = {"REQUANT": 0, "SOFTMAX_ONLINE": 0, "VEC": 1, "LN": 3}.get(c.op)
+        # slots as rtl/vec_seq.sv sat_cnt: 0 requant, 1 ALU, 2 LN out, 3 LN z, 4 softmax score
+        unit = {"REQUANT": 0, "VEC": 1, "LN": 2, "SOFTMAX_ONLINE": 4}.get(c.op)
         if c.op == "LN":
-            self.sat[2] = _sat32(self.sat[2] + dz)
+            self.sat[3] = _sat32(self.sat[3] + dz)
             d -= dz
         if unit is not None and d:
             self.sat[unit] = _sat32(self.sat[unit] + d)

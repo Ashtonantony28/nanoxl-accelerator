@@ -333,7 +333,7 @@ def test_driver_perf_and_saturation_counters(bundle):
     assert p["cycles"] == t.cycles and p["busy_arr"] == t.busy["array"] and p["busy_dma"] == t.busy["dma"]
     assert dev.last_perf == p
     sat = dev.saturation()
-    assert set(sat) == {"requant", "alu", "ln_z", "ln_out"}
+    assert set(sat) == {"requant", "alu", "ln_out", "ln_z", "score"}
     dev.clear_counters()
     assert all(v == 0 for v in dev.perf().values()) and all(v == 0 for v in dev.saturation().values())
 

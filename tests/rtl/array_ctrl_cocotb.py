@@ -16,6 +16,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, ReadOnly
 from cocotb.utils import get_sim_time
 
+from nanoxl.graph import group_gemm
 from nanoxl.numerics import gemm_i8, pack_i4, unpack_i4
 
 N = int(os.environ.get("ARR_N", "4"))
@@ -75,7 +76,7 @@ class TB:
         self.stop()
         d.rst_n.value = 0
         for s in ("cmd_valid", "cmd_m", "cmd_k", "cmd_n", "cmd_abase", "cmd_acc", "cmd_emit",
-                  "cmd_int4", "w_valid", "w_data", "a_valid", "a_data", "out_ready"):
+                  "cmd_int4", "cmd_gs", "w_valid", "w_data", "a_valid", "a_data", "out_ready"):
             getattr(d, s).value = 0
         for _ in range(3):
             await FallingEdge(d.clk)
@@ -96,6 +97,7 @@ class TB:
                 d.cmd_m.value, d.cmd_k.value, d.cmd_n.value = c["m"], c["k"], c["n"]
                 d.cmd_abase.value = c["abase"]
                 d.cmd_acc.value, d.cmd_emit.value, d.cmd_int4.value = c["acc"], c["emit"], c["int4"]
+                d.cmd_gs.value = c.get("gs", 0)
                 await ReadOnly()
                 if int(d.cmd_ready.value):
                     self.cmds.popleft()
@@ -165,6 +167,41 @@ class TB:
             exp[:, :n] = gemm_i8(a, w)
             for mm in range(m):
                 self.expect.append(([int(x) for x in exp[mm]], int(mm == m - 1)))
+
+    def gemm_gs(self, a, w, gm, group, abase=None):
+        """W4A8 GEMM with group scales (ADR-004): K-tiles of min(N, group) rows, each inside one
+        group; every tile carries its group's scale row as weight beat 0 (cmd_gs=1)."""
+        m, ktot = a.shape
+        n = w.shape[1]
+        assert n <= N and m <= MDEPTH
+        if abase is None:
+            abase = self.rng.randrange(MDEPTH)
+        kt = min(N, group)
+        tiles = [(k0, min(kt, ktot - k0)) for k0 in range(0, ktot, kt)]
+        for i, (k0, k) in enumerate(tiles):
+            last = i == len(tiles) - 1
+            self.cmds.append(dict(m=m, k=k, n=n, abase=abase, acc=int(i > 0), emit=int(last),
+                                  int4=1, gs=1))
+            self.ws.append(pack(gm[k0 // group], 8, 8 * N, self.rng))
+            for r in range(k):
+                self.ws.append(pack(w[k0 + r], 4, 8 * N, self.rng))
+            for mm in range(m):
+                self.as_.append(pack(a[mm, k0:k0 + k], 8, 8 * N, self.rng))
+        exp = np.zeros((m, N), np.int64)
+        exp[:, :n] = group_gemm(a, w, gm, group)
+        exp = (exp + (1 << 31)) % (1 << 32) - (1 << 31)
+        for mm in range(m):
+            self.expect.append(([int(x) for x in exp[mm]], int(mm == m - 1)))
+
+    def rand_gemm_gs(self):
+        group = self.rng.choice([8, 16, 64]) if N <= 16 else self.rng.choice([8, 64])
+        m = self.rng.randint(1, min(MDEPTH, 2 * N))
+        ktot = self.rng.randint(1, 3 * max(N, group) // 2)
+        n = self.rng.randint(1, N)
+        w = self.nrng.integers(-8, 8, (ktot, n), dtype=np.int8)
+        a = self.nrng.integers(-128, 128, (m, ktot), dtype=np.int8)
+        gm = self.nrng.integers(0, 256, (-(-ktot // group), n), dtype=np.uint8)
+        self.gemm_gs(a, w, gm, group)
 
     def rand_gemm(self, int4=None):
         if int4 is None:
@@ -314,3 +351,72 @@ async def ctrl_perf_streaming(dut):
                       "fill latency %d", label, N, m, k, period, max(m, k), first)
         assert period == max(m, k), (label, period)  # no bubbles
         assert first == LAT + 5, first  # a-beat reg + LAT + RMW stage + FIFO write/read/queue
+
+
+@cocotb.test()
+async def ctrl_gs_random(dut):
+    """GEMM_GS tiles (cmd_gs, ADR-004) mixed with plain INT8/INT4 GEMMs: random M, K across
+    several groups (ragged last group), ragged n, group sizes 8..64, random uint8 scales,
+    random bubbles and backpressure. cmd_gs=0 commands interleaved must be unaffected."""
+    tb = TB(dut, 900 + N, p_cmd=0.7, p_w=0.7, p_a=0.8, p_out=0.6)
+    await tb.start()
+    for i in range(int(os.environ.get("ARR_NJOBS", "40")) // 2):
+        if i % 3 == 2:
+            tb.rand_gemm()
+        else:
+            tb.rand_gemm_gs()
+    await tb.wait_done()
+
+
+@cocotb.test()
+async def ctrl_gs_extremes(dut):
+    """Group-scale bounds: w=-8, a=-128 over full tiles with gm=255 (largest |psum| x scale),
+    gm=0 (scaled tile vanishes), gm=1; M=1 K=1-row gs tiles back to back (scale FIFO at its
+    highest occupancy, accumulator bypass)."""
+    tb = TB(dut, 950 + N)
+    await tb.start()
+    G = 8 if N <= 8 else 16
+    ktot = 4 * G
+    a = np.full((3, ktot), -128, np.int8)
+    a[1, :] = 127
+    w = np.full((ktot, N), -8, np.int8)
+    w[:, 1::2] = 7
+    gm = np.array([[255] * N, [0] * N, [1] * N, list(range(256 - N, 256))], np.uint8)
+    tb.gemm_gs(a, w, gm, G)
+    for _ in range(3):
+        k = tb.rng.randint(2, 12)
+        a1 = tb.nrng.integers(-128, 128, (1, k), dtype=np.int8)
+        w1 = tb.nrng.integers(-8, 8, (k, N), dtype=np.int8)
+        gm1 = tb.nrng.integers(0, 256, (k, N), dtype=np.uint8)
+        # group 8 with K=1 tiles is not a real layout; drive one-row tiles by hand instead
+        for i in range(k):
+            tb.cmds.append(dict(m=1, k=1, n=N, abase=3, acc=int(i > 0), emit=int(i == k - 1),
+                                int4=1, gs=1))
+            tb.ws.append(pack(gm1[i], 8, 8 * N, tb.rng))
+            tb.ws.append(pack(w1[i], 4, 8 * N, tb.rng))
+            tb.as_.append(pack(a1[0, i:i + 1], 8, 8 * N, tb.rng))
+        tb.expect.append(([int(x) for x in group_gemm(a1, w1, gm1, 1)[0]], 1))
+    await tb.wait_done()
+    assert tb.got[0][0] == 255 * G * 1024 + 0 + G * 1024 + (256 - N) * G * 1024
+
+
+@cocotb.test()
+async def ctrl_gs_perf(dut):
+    """Back-to-back cmd_gs tiles: the scale beat costs one weight-port cycle, so a tile takes
+    max(M, K+1) cycles (GEMV: K+1, prefill M >= K+1: M, no bubble)."""
+    for i, (m, k) in enumerate([(1, N), (2 * N, N), (N + 1, N)]):
+        tb = TB(dut, 990 + i)
+        await tb.start(i == 0)
+        tiles = 12
+        for _ in range(tiles):
+            a = tb.nrng.integers(-128, 128, (m, k), dtype=np.int8)
+            w = tb.nrng.integers(-8, 8, (k, N), dtype=np.int8)
+            gm = tb.nrng.integers(0, 256, (1, N), dtype=np.uint8)
+            tb.gemm_gs(a, w, gm, max(k, 8))
+        tb.out_cycles = []
+        await tb.wait_done()
+        period = (tb.out_cycles[-1] - tb.out_cycles[m - 1]) / (tiles - 1)
+        tb.stop()
+        dut._log.info("PERF gs N=%d M=%d K=%d %.2f cycles/tile (ideal max(M,K+1)=%d)",
+                      N, m, k, period, max(m, k + 1))
+        assert period == max(m, k + 1), period

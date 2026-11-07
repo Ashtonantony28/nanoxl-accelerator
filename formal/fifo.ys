@@ -1,0 +1,8 @@
+# yosys script: elaborate the FORMAL properties of the module into an SMT2 model
+# (paths relative to formal/; run every proof with: python3 formal/run_formal.py)
+read_verilog -formal -sv ../rtl/fifo_sync.sv
+chparam -set W 4 -set DEPTH 4 fifo_sync
+prep -top fifo_sync
+async2sync
+dffunmap
+write_smt2 -wires fifo.smt2

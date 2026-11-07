@@ -11,7 +11,8 @@ from collections import deque
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import FallingEdge, ReadOnly
+from cocotb.triggers import FallingEdge, ReadOnly, Timer
+from cocotb.utils import get_sim_time
 
 from nanoxl import isa
 
@@ -36,6 +37,32 @@ def set_axi_pauses(ram, rng, p: float, read_only=False):
         w.aw_channel.set_pause_generator(rand_pause(random.Random(rng.random()), p))
         w.w_channel.set_pause_generator(rand_pause(random.Random(rng.random()), p))
         w.b_channel.set_pause_generator(rand_pause(random.Random(rng.random()), p))
+
+
+def add_read_latency(rif, lat_cycles, period_ns):
+    """Give a cocotbext-axi read slave (AxiRamRead / AxiRam.read_if) a pipelined DDR-like latency: the
+    first R beat of a burst is sent no earlier than `lat_cycles` clock periods after its AR handshake.
+    Bursts stay in order and several can be outstanding (each AR is time-stamped when it is sampled,
+    and the slave's read process waits for that burst's own deadline only), so the latency overlaps
+    the data of earlier bursts the way a real HP port / DDR controller does."""
+    if lat_cycles <= 0:
+        return
+    ch = rif.ar_channel
+    orig_sample, orig_recv = ch.bus.sample, ch.recv
+
+    def sample(obj):
+        orig_sample(obj)
+        obj._t_ar = get_sim_time("ns")
+
+    async def recv():
+        ar = await orig_recv()
+        wait = ar._t_ar + lat_cycles * period_ns - get_sim_time("ns")
+        if wait > 0:
+            await Timer(wait, "ns")
+        return ar
+
+    ch.bus.sample = sample
+    ch.recv = recv
 
 
 def sig(dut, name):

@@ -12,11 +12,13 @@ from collections import deque
 import cocotb
 from cocotbext.axi import AxiBus, AxiRam
 
-from ctrl_common_cocotb import AxiMonitor, Bench, SpadModel, dma_apply, set_axi_pauses, word_int
+from ctrl_common_cocotb import (AxiMonitor, Bench, SpadModel, add_read_latency, dma_apply, set_axi_pauses,
+                                word_int)
 from nanoxl import isa
 
 MAXB = int(os.environ.get("DMA_MAXB", "256"))
 NCMD = int(os.environ.get("DMA_NCMD", "60"))
+LDF = int(os.environ.get("DMA_LDF", "512"))
 WIN_BASE = 0x4000_0000
 WIN = 1 << 20
 
@@ -281,6 +283,7 @@ async def dma_reset_mid_stream(dut):
         tb.cmd.reset()
         tb.sp.reset()
         await tb.bench.reset()
+        tb.sp.reset()        # a line read sampled in the first reset cycle must not return after it
         assert int(dut.cmd_ready.value) == 1 and int(dut.axi_idle.value) == 1 and int(dut.busy.value) == 0
         # the interrupted command left partial data: resynchronise the shadow state
         tb.ddr[:] = tb.ram.read(WIN_BASE, WIN)
@@ -290,3 +293,64 @@ async def dma_reset_mid_stream(dut):
         cmds = [rand_dma(rng) for _ in range(3)]
         out = await tb.run_cmds(cmds)
         tb.check(out)
+
+
+class EventLog:
+    """Cycle of every AR handshake and every done pulse (pipelining checks)."""
+
+    def __init__(self, dut, bench):
+        self.d, self.b = dut, bench
+        self.ar, self.done = [], []
+
+    def drive(self):
+        pass
+
+    def sample(self):
+        if int(self.d.m_axi_arvalid.value) and int(self.d.m_axi_arready.value):
+            self.ar.append(self.b.cycle)
+        if int(self.d.done.value):
+            self.done.append(self.b.cycle)
+
+
+@cocotb.test()
+async def dma_pipelined_loads(dut):
+    """SG10a: with a 40-cycle read latency, back-to-back LOADs overlap: the next command's ARs go out
+    before the previous command is done, so 8 x 1 KiB loads take about 8 x 64 beats + one latency
+    instead of 8 x (64 + 40). Then a mixed LOAD/STORE batch on overlapping DDR and scratchpad bytes
+    under latency and backpressure: stores stay exclusive, results equal the in-order reference."""
+    lat = 40
+    tb = TB(dut, 11, p_axi=0.0, p_sp=1.0)
+    add_read_latency(tb.ram.read_if, lat, 10)
+    log = EventLog(dut, tb.bench)
+    tb.bench.agents.append(log)
+    tb.cmd.p = 1.0
+    await tb.start()
+    B = WIN_BASE + 0x40000
+    cmds = [isa.C("DMA_LOAD", sp_buf=1, sp_addr=0x1000 * k + 16, ddr_addr=B + 0x400 * k, rows=1, row_bytes=1024)
+            for k in range(8)]
+    t0 = tb.bench.cycle
+    await tb.run_cmds(cmds)
+    tb.check()
+    took = log.done[-1] - t0
+    dut._log.info("8 pipelined 1 KiB loads: %d cycles (serial would be about %d)", took, 8 * (64 + lat + 3))
+    if LDF >= 4 * lat:      # the load FIFO covers the latency (the MAXB 16 / LDF 32 build cannot)
+        assert took < 8 * 64 + 2 * lat + 8 * 4, took
+    # overlap: the first AR of command k+1 precedes the done of command k
+    bpc = 64 // min(MAXB, 64)          # bursts per 1 KiB command
+    first_ar = [log.ar[k * bpc] for k in range(8)]
+    for k in range(7):
+        assert first_ar[k + 1] < log.done[k], (k, first_ar[k + 1], log.done[k])
+    # mixed batch, overlapping addresses, with backpressure: in-order semantics preserved
+    set_axi_pauses(tb.ram, tb.rng, 0.3)
+    tb.cmd.p = 0.8
+    rng = random.Random(12)
+    for _ in range(6):
+        batch = []
+        for _ in range(rng.randint(3, 8)):
+            op = rng.choice(["DMA_LOAD", "DMA_LOAD", "DMA_STORE"])
+            rb = rng.randint(1, 600)
+            batch.append(isa.C(op, chan=rng.randint(0, 3), sp_buf=rng.randint(0, 1), sp_addr=rng.randrange(0x2000),
+                               ddr_addr=B + rng.randrange(0x1800), rows=rng.randint(1, 3), row_bytes=rb,
+                               ddr_stride=rng.choice([0, rb + rng.randint(0, 50)])))
+        await tb.run_cmds(batch)
+        tb.check()

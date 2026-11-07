@@ -199,6 +199,7 @@ the same on Icarus (default `SIM`). Sample sizes are larger under Verilator.
 | `test_layernorm.py` (L = 1, 4, 16) | Every slot is loaded from its PBUF LN block (`nanoxl.funcsim.ln_block`), line by line. Slots 0..8 = the tiny bundle's LayerNorms, slots 9..15 random constants (eps_q 0..2^30, sqrt_d of a wider LN, every `sh`, extreme g/b, small g with many exact rounding halves) for rows up to 384. Random rows (lengths 1..384, interior masks) with both saturation points exercised and the counters equal to the reference counts; **every LN input row** of one 128-token golden forward pass (9·128 = 1,152 rows; sampled at L = 1, 4 on Icarus), bit-exact, with the counters equal to `Golden.sat_count`; corners: all-equal rows (Q = eps_q, Q = 0 → 1), ±32768 rows, one-outlier rows, length 1, L ± 1, 383, 384; full-rate cycle count = 3·nb + 19; `sat_clr`/sticky; `err_len` and recovery. |
 | `test_sfu_vec.py` (L = 1, 4, 16) | `vec_unit` + `sfu` end to end: random command mixes of ALU, REQUANT, REDUCE and every SFU sub-op (incl. SOFTMAX_RQ with causal limits, reserved → `illegal_op`) with random valid gaps / backpressure on all six streams; LUT_LOAD tables, GELU tables, LN blocks and score records written through the cfg port as PBUF lines; every D and R beat, all five saturation counters, `illegal_op`, `busy`. A layer-like back-to-back sequence (LN per slot, GELU per table, softmax and SOFTMAX_RQ rows, lengths 1..256). |
 | `test_sfu_synth.py` (slow) | Yosys generic synthesis at L = 4, no latches (§8). |
+| `test_vec_seq.py` (SG7b) | the VEC engine drives these units from ISA commands; its L = 64 run found the lane-position overflow fixed in `layernorm.sv` (gp/bp were 5 bits, wrapping for lanes ≥ 32) |
 | existing `test_vec_*` | unchanged and passing (`vec_unit.sv` is not modified). |
 
 Mutation sanity results are recorded in the SG5 report.
@@ -236,3 +237,43 @@ are the multipliers and the memory read muxes.
 - **Tables per lane**: each consumer lane has its own copy (one read port each); the cfg
   port writes all copies at once.
 - `in_fmt` and `in_shamt` from the hook are not used by any C5 op.
+
+## 10. PBUF parameter loader and slot residency (`pbuf_loader`, SG7b)
+
+`rtl/pbuf_loader.sv` is the loader §2 and §6 ask for: the VEC engine (`vec_seq`,
+docs/vector-unit.md §9) hands it one block per command, and it copies the block from PBUF
+over a 16-byte line read port (up to 16 lines in flight, one line per cycle) into the cfg port.
+
+| ISA command | block | region / slot | lines |
+|---|---|---|---|
+| LUT_LOAD t | 256 × uint16 | region t (0..2) | 32 |
+| GELU | GELU LUT at `lut_addr` | 3, one of NG slots | 16 |
+| LN | LN block at `param_addr` (`cols`) | 4, one of NSLOT slots | 2 + ceil(cols/8) + ceil(cols/4) |
+| SOFTMAX_ONLINE | score record at `ctx_addr` | 5, one of NCTX slots | 1 |
+| REQUANT | N records (or record 0 if per-tensor) | engine record buffer, never cached | N per column chunk |
+
+**Residency policy.** Each slot carries a tag {valid, first PBUF line, end line, cols}. A
+block whose first line (and, for LN, cols) matches a valid tag is a hit: no PBUF read, 1
+cycle. A miss loads into the first free slot of its kind, else the round-robin victim. A tag
+is dropped when any PBUF line in [first, end) is written: the DMA's writes come in on
+`pb_snoop_*`, the engine's own (a VEC with `dst_buf` = PBUF) are snooped internally; reset and
+`clr` drop all tags (and the LUT-loaded flags). A hit therefore always uses exactly the bytes
+PBUF holds at that moment, for any program, with no compiler cooperation. This is the same
+rule `nanoxl/cyclemodel.py` (SG4c) models.
+
+**The current compiler** DMA-loads every LN block, GELU table, score+PV record pair and the
+SFU tables in every program (they live in the PBUF ring), so the snoop invalidates them and
+every LN / GELU / LUT_LOAD of a program misses; the softmax ctx record is shared by the H
+heads of a layer and hits H − 1 times. Measured on the tiny W8A8 bundle (2 programs:
+prefill + decode): 40 misses, 24 hits (all ctx). Per program the reloads are
+9 LN × 50 + 4 GELU × 16 + 4 ctx + 3 × 32 LUT = 614 lines, about 614 + 20 × (latency + 4)
+cycles, i.e. ≈ 0.7k cycles of a 1-token decode program's VEC queue at L = 4. Measured
+per command (L = 4, read latency 2): LN 1 × 128 miss 185 cycles vs hit 134 (51 cycles =
+50 lines + 1); LUT_LOAD miss 42 vs hit 8. With a compiler that pins parameter blocks at fixed
+PBUF addresses and skips their re-DMA (`TINY_SNOOP=changed` in the bench models this), every
+program after the first is all hits; the hardware needs no change for that.
+
+Slot counts must cover the working set for full residency: tiny needs NSLOT ≥ 9 LN, NG ≥ 4
+GELU, NCTX ≥ 4; `shakespeare` (6 layers) needs NSLOT ≥ 13, NG ≥ 6, NCTX ≥ 6 (NG = 6 exceeds the `sfu_vec`
+default NG = 4). Fewer slots are still correct (round-robin
+evictions reload).

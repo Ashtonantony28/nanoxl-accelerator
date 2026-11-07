@@ -241,3 +241,79 @@ In both `requant` and `vec_alu`, most of the cells are the four 32×32 multiplie
   - Options: restrict ALU MUL to 16×16 operands, which the design plan's int16 residual and LayerNorm scale probably allow, or share the multiplier between requant and the ALU, since the two never run in the same cycle for the same command.
 - **Reduce tree timing.** The tree adds L lanes in a single cycle: at L = 64 that is 6 levels of 48-bit adders. At 250 MHz it may need one more pipeline register. The tree is written as a heap, so a register can be inserted at any level.
 - **Combinational `in_ready` path.** `in_ready` depends combinationally on `out_ready` (§1).
+
+## 9. VEC engine (`vec_seq`, SG7b)
+
+`rtl/vec_seq.sv` executes the VEC-queue ISA commands (docs/isa.md §4) on `sfu_vec`
+(vec_unit + SFU). Helpers: `vec_seq_walk.sv` (line-address walker), `vec_seq_rd.sv`
+(source stream: line reads → L-lane beats), `vec_seq_wr.sv` (D beats → lines with byte
+strobes), `pbuf_loader.sv` (parameter loads and slot residency, docs/sfu.md §10).
+Bench: `tests/rtl/test_vec_seq.py` (`vec_seq_cocotb.py`, harness `vec_seq_common_cocotb.py`).
+
+### 9.1 Ports
+
+| group | signals | notes |
+|---|---|---|
+| engine | `cmd_valid/cmd_ready/cmd_word[127:0]`, `done`, `err`, `err_code[3:0]`, `busy` | docs/control.md §2. 2-entry command queue; one `done` per command, in order, ≥ 1 cycle after accept, after the last write of the command was accepted |
+| read A, B | `r{a,b}_arvalid/arready/arbuf[2:0]/araddr[16:0]`, `r{a,b}_rvalid/rdata[127:0]` | DMA `sp_*` read shape: line addresses, in-order responses, any latency, no backpressure, ≤ 16 lines in flight per port (credit) |
+| read P | `rp_arvalid/arready/araddr`, `rp_rvalid/rdata` | always PBUF |
+| write D | `wd_valid/wd_ready/wd_buf/wd_addr/wd_data/wd_strb` | a write is complete (visible to every later read) when accepted |
+| snoop | `pb_snoop_valid`, `pb_snoop_line[16:0]` | every PBUF line written by another unit (DMA); the engine's own PBUF writes are snooped internally |
+| clear | `clr` | `eng_clr` of the command processor; same effect as reset, except that read responses still in flight are absorbed (no new reads until they are back) |
+| status | `sat_clr`, `sat_cnt[159:0]`, `st_hits/st_misses/st_lines` | `sat_cnt` = {score, ln_z, ln_out, ALU, requant}; wire to `ctrl_top` with `NSAT = 5` (SAT_0..4) |
+
+### 9.2 Command mapping
+
+Rows are vec_unit commands (`cmd_len` ≤ 16 bits); every row starts on a line (alignment rule).
+
+| ISA | rows | vec_unit op | A (elem) | B / P | D |
+|---|---|---|---|---|---|
+| VEC | ceil(len/4096) chunks | COPY→PASS, ADD, SUB, MUL (shamt 0), MAX, MIN, ADDI→ADD `b_imm`, SHRR→SRAR, SHL; `fmt` = dt_out | src0 (dt_in) | B = src1 for ADD..MIN | dst (dt_out) |
+| REQUANT | M per column chunk of ≤ RQ_MAX (256) | REQUANT, `fmt` = out16 | ACC int32 | per-channel: bias/mult/shift from the record buffer; per-tensor: `b_imm`/`p_imm` from record 0 | ABUF int8/16 |
+| LN | rows | SFU LN, imm = LN slot | ABUF int16/int8 | – | ABUF int8 |
+| SOFTMAX_ONLINE | rows | SFU SOFTMAX_RQ, imm = {visible cols, ctx slot}; visible = min(cols, i + diag + 1) if causal | ACC int32 | – | ABUF int8 |
+| GELU | ceil(len/4096) chunks | SFU GELU, imm = table slot | ABUF int8 | – | ABUF int8 |
+| KV_APPEND | rows × heads | PASS int8 | ABUF, (t, h) at src + t·stride + h·dh | – | KVBUF + (h·ctx + pos + t)·dh |
+| LUT_LOAD | – | 32 cfg writes (pbuf_loader) | – | – | – |
+
+Errors (command skipped, `done` still pulses, first cause in `err_code`): 1 not a VEC-queue
+opcode / reserved bits, 2 bad vop/dt/buffer/table, 3 SHRR/SHL imm ∉ [0, 31], 4 SOFTMAX
+first/last ≠ 1 or causal with diag < 0 (a row with no visible column), 5 LN cols > D_MAX or
+softmax cols > CTX_MAX, 6 LN/SOFTMAX before the LUT_LOAD of its tables, 7 KV_APPEND dh not a
+multiple of 16 or pos + rows > ctx, 8 REQUANT record with ls ≠ 0 (found while loading; the
+command completes), 9 SFU `err_len` / vec_unit `illegal_op`.
+
+Limits: commands run one at a time (no overlap between commands; the pipeline drains, about
+10–20 cycles). A destination may overlap its source only element for element (in place, same
+element size: the compiler's residual ADD and GELU); funcsim's read-all-then-write semantics
+are not reproduced for other overlaps. KV_APPEND needs dh % 16 = 0 (the compiler's rule).
+
+### 9.3 Throughput
+
+Each port moves one 16-byte line per cycle, so a stream delivers min(L, 16/eb) elements per
+cycle. At L = 4 everything except int32 at L > 4 runs at vec_unit rate; at L = 16/64 int32
+(REQUANT and softmax scores from ACC) and wide int16 rows are port-bound (L·eb/16 cycles per
+beat). REQUANT also reads one 16-byte record per output channel per chunk (N lines). For the
+KV260 (L = 64) SG7c should widen the ACC/ABUF ports or bank them (a parameterized line width
+is the natural extension of `vec_seq_rd/wr`). Measured (tiny W8A8, L = 4, random port ready
+80 %, latency 1–6): 6-token prefill + 1 decode step = 186 VEC-queue commands in 59k cycles.
+
+### 9.4 Verification
+
+`SIM=icarus|verilator python3 -m pytest -q tests/rtl/test_vec_seq.py` (L = 4, 16; slow
+Verilator-only L = 64). Every bench runs funcsim as the reference and checks, at each
+`done`: the command's whole destination byte for byte, that no write fell outside it (byte
+strobes), and all five saturation counters equal funcsim's per-op counts so far; every
+batch ends with a compare of all five buffers.
+
+| bench | what |
+|---|---|
+| `vec_seq_smoke` | one command of each kind, full-rate ports |
+| `vec_seq_random` / `_fast_ports` | 40 / 25 (Icarus) or 150 / 100 (Verilator) random legal commands: every vop × dt_in × dt_out, any buffers, lengths 1..9000 (chunking), in-place forms, REQUANT per-channel / per-tensor / N > RQ_MAX, LN with bundle and random in-domain blocks (cols 1..384), softmax with causal limits and bundle / random score records, GELU, KV_APPEND, repeated LUT_LOADs, engine-written PBUF (VEC COPY over an LN block), DMA-rewritten parameter blocks between batches; random port ready/latency and command gaps, or full rate with back-to-back commands |
+| `vec_seq_tiny_forward` | every VEC-queue command the compiler emits for the tiny W8A8 bundle for a prefill (6 or 8 tokens) + one decode step (LUT_LOAD, LN, REQUANT, KV_APPEND, SOFTMAX_ONLINE, VEC, GELU), DMA/GEMM done by funcsim, PBUF lines of every DMA_LOAD snooped |
+| `vec_seq_errors` | every error code, skip + done, first cause kept, clr clears, legal commands still run after an error |
+| `vec_seq_clear_mid_command` | 9 clr / rst_n pulses inside long commands with reads in flight: no done or write afterwards, idle, then a fresh batch is exact |
+| `vec_seq_residency` | hit / miss / snooped-rewrite / eviction behaviour and cycle costs (docs/sfu.md §10) |
+
+Mutation sanity (each killed, then reverted): pbuf_loader without snoop invalidation;
+REQUANT per-channel mult taken from the wrong record. See the SG7b report.

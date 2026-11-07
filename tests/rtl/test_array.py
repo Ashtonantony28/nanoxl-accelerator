@@ -9,8 +9,10 @@ CTRL = CORE + ["rtl/scratchpad.sv", "rtl/array_ctrl.sv"]
 
 
 @pytest.mark.parametrize("n", [4, 8])
-def test_array_core(n):
-    run("systolic_array", CORE, "array_cocotb", parameters={"N": n, "TAG_W": 8},
+@pytest.mark.parametrize("pack", [0, 1])
+def test_array_core(n, pack):
+    """pack=1: WP486 2-MAC pe_pair grid (the default); pack=0: one pe per DSP."""
+    run("systolic_array", CORE, "array_cocotb", parameters={"N": n, "TAG_W": 8, "PACK": pack},
         extra_env={"ARR_N": str(n)})
 
 

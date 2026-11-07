@@ -29,7 +29,8 @@ module systolic_array #(
     parameter int TAG_W = 1,
     parameter int AW    = 8,
     parameter int WW    = 8,
-    parameter int ACCW  = 32
+    parameter int ACCW  = 32,
+    parameter int PACK  = 1     // 1: WP486 INT8 2-MAC packing, one DSP per PE pair (pe_pair)
 ) (
     input  logic                  clk,
     input  logic                  rst_n,
@@ -57,6 +58,8 @@ module systolic_array #(
     localparam int RB  = $clog2(N);
     localparam int LW  = AW + 3;        // activation skew lane {gen, v, sel, a}
     localparam int WL  = WW + RB + 3;   // weight-write skew lane {gen, en, bank, row, w}
+    // PACK needs 8-bit operands and an even N; otherwise the plain PE grid is built
+    localparam int PK  = (PACK != 0 && N % 2 == 0 && AW == 8 && WW == 8) ? 1 : 0;
 
     // ---- input skew -------------------------------------------------------------------
     logic [N*LW-1:0] sk_in, sk_out;
@@ -75,8 +78,22 @@ module systolic_array #(
                               : w_wr_data[c*WW +: WW];
         assign wk_in[c*WL +: WL] = {w_wr_gen, w_wr_en, w_wr_bank, w_wr_row, wv};
     end
-    skew #(.LANES(N), .W(WL), .REVERSE(0)) u_wskew (
-        .clk(clk), .rst_n(rst_n), .din(wk_in), .dout(wk_out));
+    // Column c's write is delayed by c cycles; with PK, column 2p+1 is written together with
+    // column 2p (delay 2p), the cycle its pe_pair multiplies both columns.
+    if (PK == 0) begin : g_wskew
+        skew #(.LANES(N), .W(WL), .REVERSE(0)) u_wskew (
+            .clk(clk), .rst_n(rst_n), .din(wk_in), .dout(wk_out));
+    end else begin : g_wskew_pk
+        for (genvar c = 0; c < N; c++) begin : g_l
+            localparam int WD = c - (c % 2);
+            if (WD == 0) begin : g_wire
+                assign wk_out[c*WL +: WL] = wk_in[c*WL +: WL];
+            end else begin : g_dly
+                delay_pipe #(.W(WL), .D(WD)) u_d (
+                    .clk(clk), .rst_n(rst_n), .din(wk_in[c*WL +: WL]), .dout(wk_out[c*WL +: WL]));
+            end
+        end
+    end
 
     // ---- PE grid -----------------------------------------------------------------------
     // a/v/sel buses: index (r*(N+1)+c) is the input of PE(r,c); c = N is the dangling output.
@@ -105,20 +122,46 @@ module systolic_array #(
             wire          wc_bank = wk_out[c*WL + WW + RB];
             wire [RB-1:0] wc_row  = wk_out[c*WL + WW +: RB];
             wire          pe_we   = wc_en && (wc_row == RB'(r));
-            pe #(.AW(AW), .WW(WW), .ACCW(ACCW)) u_pe (
-                .clk      (clk),
-                .rst_n    (rst_n),
-                .a_in     (a_bus[IH]),
-                .a_v_in   (v_bus[IH]),
-                .a_sel_in (s_bus[IH]),
-                .a_out    (a_bus[IH+1]),
-                .a_v_out  (v_bus[IH+1]),
-                .a_sel_out(s_bus[IH+1]),
-                .psum_in  (p_bus[IV]),
-                .psum_out (p_bus[IV+N]),
-                .w_wr_en  (pe_we),
-                .w_wr_bank(wc_bank),
-                .w_wr_data(wk_out[c*WL +: WW]));
+            if (PK == 0) begin : g_pe
+                pe #(.AW(AW), .WW(WW), .ACCW(ACCW)) u_pe (
+                    .clk      (clk),
+                    .rst_n    (rst_n),
+                    .a_in     (a_bus[IH]),
+                    .a_v_in   (v_bus[IH]),
+                    .a_sel_in (s_bus[IH]),
+                    .a_out    (a_bus[IH+1]),
+                    .a_v_out  (v_bus[IH+1]),
+                    .a_sel_out(s_bus[IH+1]),
+                    .psum_in  (p_bus[IV]),
+                    .psum_out (p_bus[IV+N]),
+                    .w_wr_en  (pe_we),
+                    .w_wr_bank(wc_bank),
+                    .w_wr_data(wk_out[c*WL +: WW]));
+            end else if (c % 2 == 0) begin : g_pair
+                // PE(r,c) and PE(r,c+1) in one pe_pair; both multiply the activation of
+                // cycle T + r + c. The column c+1 bus entry mirrors the pair input (what that
+                // PE multiplies, for the hazard checker).
+                assign a_bus[IH+1] = a_bus[IH];
+                assign v_bus[IH+1] = v_bus[IH];
+                assign s_bus[IH+1] = s_bus[IH];
+                pe_pair #(.ACCW(ACCW)) u_pp (
+                    .clk       (clk),
+                    .rst_n     (rst_n),
+                    .a_in      (a_bus[IH]),
+                    .a_v_in    (v_bus[IH]),
+                    .a_sel_in  (s_bus[IH]),
+                    .a_out     (a_bus[IH+2]),
+                    .a_v_out   (v_bus[IH+2]),
+                    .a_sel_out (s_bus[IH+2]),
+                    .psum_in_a (p_bus[IV]),
+                    .psum_out_a(p_bus[IV+N]),
+                    .psum_in_b (p_bus[IV+1]),
+                    .psum_out_b(p_bus[IV+1+N]),
+                    .w_wr_en   (pe_we),
+                    .w_wr_bank (wc_bank),
+                    .w_wr_a    (wk_out[c*WL +: WW]),
+                    .w_wr_b    (wk_out[(c+1)*WL +: WW]));
+            end
         end
     end
 
@@ -138,7 +181,9 @@ module systolic_array #(
     logic [1:0]   wsh  [0:2*N*N-1];   // per PE per bank: {written, gen}
     logic [N-1:0] gsr  [0:N-1];       // per row: activation gen bit at columns 1..N-1
     function automatic logic act_gen(input int r, input int c);
-        act_gen = (c == 0) ? sk_out[r*LW + AW + 2] : gsr[r][c-1];
+        int cc;
+        cc = (PK != 0) ? c - (c % 2) : c;      // packed: column 2p+1 multiplies with 2p
+        act_gen = (cc == 0) ? sk_out[r*LW + AW + 2] : gsr[r][cc-1];
     endfunction
 
     // evaluated once per clock edge on the values the PEs use in the ending cycle

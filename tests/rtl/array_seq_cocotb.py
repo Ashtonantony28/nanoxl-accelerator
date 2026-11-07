@@ -526,3 +526,51 @@ async def seq_compiler_perf(dut):
     for r in rows:
         dut._log.info("PERF %s | %s | %d | %d | %d | %d | %d", *r)
     tb.stop()
+
+
+@cocotb.test(skip=not FAST)
+async def seq_perf_streaming(dut):
+    """Steady-state cycles per command (done to done, the same command twice back to back, no
+    backpressure, latency 1) equal sum over tiles of max(m, k) (k+1 for GEMM_GS tiles) for aligned
+    operands: the engine adds no bubble between tiles, k-chains, n-tiles, row chunks or commands."""
+    tb = SeqTB(dut, 8000 + NA)
+    await tb.start()
+    fresh_images(tb, 9)
+    D = 2 * NA
+
+    def g(op="GEMM", M=1, N=D, K=D, **kw):
+        sa, cs = -(-K // 16), -(-4 * N // 16)
+        return isa.C(op, gemv=int(M == 1), accumulate=0, a_addr=0, w_addr=0, c_addr=0, M=M, N=N, K=K,
+                     a_stride=sa, c_stride=cs, **kw)
+
+    def ideal(c):
+        f = c.f
+        gs = c.op == "GEMM_GS"
+        kt = min(NA, isa.gs_group(f["glog2"])) if gs else NA
+        tot = 0
+        for m0 in range(0, f["M"], MD):
+            mc = min(MD, f["M"] - m0)
+            for _n0 in range(0, f["N"], NA):
+                for k0 in range(0, f["K"], kt):
+                    tot += max(mc, min(kt, f["K"] - k0) + gs)
+        return tot
+
+    cases = [("gemv int8", g(N=4 * NA, K=4 * NA, int4=0)),
+             ("gemv int4", g(int4=1)),
+             ("gemv gs G=64", g("GEMM_GS", N=D, K=64, glog2=3)),
+             ("gemv gs G=8", g("GEMM_GS", N=D, K=32, glog2=0)),
+             ("prefill int8", g(M=D, int4=0)),
+             ("prefill gs", g("GEMM_GS", M=D, K=64, glog2=3)),
+             ("rows > chunk", g(M=MD + 3, N=NA, K=NA, int4=0)),
+             ("w_trans", g(N=D, K=D, int4=0, w_trans=1)),
+             ("w_trans KVBUF M=2N", g(M=D, N=D, K=D, int4=0, w_trans=1, w_buf=1))]
+    for label, c in cases:
+        lat, occ = await measure(tb, c, [])
+        dut._log.info("PERF N=%d %-20s M=%-3d N=%-3d K=%-3d occ %4d (ideal %4d)  accept->done %d",
+                      NA, label, c.f["M"], c.f["N"], c.f["K"], occ, ideal(c), lat)
+        assert occ == ideal(c), (label, occ, ideal(c))
+    # unaligned weight rows (ragged N = 17, like the attention PV GEMM): straddling segments cost a beat
+    c = g(M=1, N=17, K=D, int4=0)
+    lat, occ = await measure(tb, c, [])
+    dut._log.info("PERF N=%d %-20s M=1 N=17 K=%d occ %d (aligned ideal %d)", NA, "ragged rows", D, occ, ideal(c))
+    tb.stop()

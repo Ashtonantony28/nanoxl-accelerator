@@ -33,6 +33,9 @@ module nanoxl_top #(
     parameter int AW         = 32,
     parameter int CTX_MAX    = 256,
     parameter int D_MAX      = 384,
+    parameter int NG         = 4,          // GELU table slots (shakespeare: 6)
+    parameter int NSLOT      = 16,         // LN parameter slots
+    parameter int NCTX       = 8,          // softmax ctx-record slots
     parameter int MAXB       = 256,
     parameter int LDF        = 512
 ) (
@@ -220,7 +223,8 @@ module nanoxl_top #(
     // every DMA write into PBUF invalidates resident parameter blocks that cover the line
     assign pb_snoop_valid = sp_wvalid && sp_wready && (sp_wbuf == 3'd3);
 
-    vec_seq #(.L(L), .AW(17), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX)) u_vec (
+    vec_seq #(.L(L), .AW(17), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX), .NG(NG), .NSLOT(NSLOT),
+              .NCTX(NCTX)) u_vec (
         .clk(clk), .rst_n(rst_n), .clr(eng_clr),
         .cmd_valid(vec_cmd_valid), .cmd_ready(vec_cmd_ready), .cmd_word(vec_cmd_word),
         .done(vec_done), .err(vec_err), .err_code(vec_err_code), .busy(vec_busy),

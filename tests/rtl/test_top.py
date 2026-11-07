@@ -26,12 +26,13 @@ def _top(n, l, tag, **env):
     run("nanoxl_top", TOP_SRC, "top_cocotb", parameters={"N": n, "L": l}, extra_env=e, tag=tag)
 
 
-@VERILATOR_ONLY
 def test_top_smoke():
-    """Fast tier: prefill of a 2-token prompt + one decode step on a 1-layer cut of tiny W8A8 (N=8, L=4);
-    logits, KV cache and per-op saturation counters bit-exact vs golden. The compiler gets a 10 KiB PBUF
-    ring, so LN blocks of different layers reuse PBUF lines (the residency snoop must invalidate)."""
-    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1, TOP_PBUF_KB=10)
+    """Fast tier: prefill of a 2-token prompt (+ one decode step on Verilator; Icarus runs the prefill
+    only, about 90 s) on a 1-layer cut of tiny W8A8 (N=8, L=4); logits, KV cache and per-op saturation
+    counters bit-exact vs golden. The compiler gets a 10 KiB PBUF ring, so different parameter blocks
+    reuse PBUF lines (the residency snoop must invalidate)."""
+    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=int(SIM == "verilator"),
+         TOP_PBUF_KB=10)
 
 
 @VERILATOR_ONLY

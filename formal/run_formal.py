@@ -26,6 +26,7 @@ JOBS = {
     "fifo8": (20, 20),    # fifo_sync W=3 DEPTH=8
     "sem": (8, 8),        # sem_unit NQ=3 NSEM=2 CW=3
     "ring": (10, 10),     # cmd_ring_ptr PW=4 FDEPTH=4 FBURST=3
+    "queue": (8, 8),      # cmd_queue QDEPTH=2 MAXOUT=2 WW=13 NCH=2 PSIG=2 (SG10a: carried SIGNALs, STORE fence)
 }
 
 

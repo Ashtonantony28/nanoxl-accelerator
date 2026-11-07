@@ -1,0 +1,8 @@
+# yosys script: elaborate the FORMAL properties of the module into an SMT2 model
+# (paths relative to formal/; run every proof with: python3 formal/run_formal.py)
+read_verilog -formal -sv ../rtl/cmd_queue.sv
+chparam -set QDEPTH 2 -set MAXOUT 2 -set NCH 2 -set PSIG 2 -set WW 13 cmd_queue
+prep -top cmd_queue
+async2sync
+dffunmap
+write_smt2 -wires queue.smt2

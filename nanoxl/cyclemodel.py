@@ -16,19 +16,24 @@ Machine model (docs/control.md §1)
     the ring end or a 4 KiB page. A word arrives ``ddr latency + k + 1`` cycles after its burst issues.
   * **Dispatch**: one word per cycle in stream order into three in-order queues (DMA, ARRAY, VEC)
     of depth 8. A full queue blocks dispatch. An entry leaves the queue when it issues.
-  * **Queues**: one command at a time per engine in this model. WAIT(s, k) blocks until k more
-    SIGNALs fired; SIGNAL fires once every earlier command of its queue has completed (results
-    visible). IRQ / END are barriers.
+  * **Queues**: one command at a time per engine in this model; the DMA queue has two engines
+    (channel ``chan & 1``, ADR-005), issued in queue order. WAIT(s, k) blocks until k more SIGNALs
+    fired; SIGNAL fires once every earlier command of its queue (both DMA channels) has completed
+    (results visible) and does not block its queue (carried on done). A DMA_STORE is a fence: it
+    starts when both DMA channels are done and nothing starts until it is done. IRQ / END are
+    barriers.
   * Because every WAIT's SIGNALs precede it in the stream (compiler invariant, checked), one pass in
     stream order computes exact event times.
 
 Per-command costs (cycles; N = array size, L = vector lanes; occupancy = engine busy, then latency
 until results are visible):
-  DMA       not pipelined against each other: occ = AR latency + data beats + 1 realigner bubble per
-            row; beats = sum over rows of the 16-byte beats the row touches (address-aligned), paced
-            by min(port bytes/cycle, DDR bytes/cycle); at most 4 bursts (<= 256 beats, no 4 KiB
-            crossing) in flight bound strided small rows to 4 bursts per latency. STORE: done at the
-            last B response (same formula).
+  DMA       pipelined (SG10a): occ = data beats + 1 realigner bubble per row + ``dma_cmd_gap``
+            (descriptor hand-off), latency = AR latency, so the next command's ARs overlap this one's
+            data; beats = sum over rows of the 16-byte beats the row touches (address-aligned), paced
+            by min(port bytes/cycle, DDR bytes/cycle / channels busy); at most 4 bursts (<= 256
+            beats, no 4 KiB crossing) in flight bound strided small rows to 4 bursts per latency.
+            STORE: done at the last B response (same formula). ``dma_pipelined=False``,
+            ``dma_masters=1``, ``signal_blocks=True`` give the pre-SG10a single engine.
   GEMM      C3 tiles (array_seq): for each N-tile and K-tile, max(M, W-port beats of the tile)
             cycles: one weight row per beat (INT4 too); a weight row segment that straddles the
             ceil(N/16)-line W window (ragged rows such as the 65-byte LM head) costs a second beat.
@@ -103,11 +108,12 @@ class RtlTiming:
     # DMA engine (docs/control.md §3)
     dma_beat_bytes: int = 16       # 128-bit AXI4 master
     axi_port_bytes: int = 16       # PS HP port width (KV260 128-bit; Zynq-7000 HP is 64-bit)
-    dma_masters: int = 1           # what-if: >1 masters on separate HP ports, beats striped
-    dma_pipelined: bool = False    # what-if: next command's AR overlaps this command's data
-    signal_blocks: bool = True     # SIGNAL at a queue head blocks the queue until it fires; what-if
-                                   # False: the signal rides on the command's done (needed for DMA pipelining)
+    dma_masters: int = 2           # DMA engines / AXI masters (SG10a): a command runs on engine chan & 1
+    dma_pipelined: bool = True     # next command's AR overlaps this command's data (SG10a; False = pre-SG10a)
+    signal_blocks: bool = False    # True (pre-SG10a): SIGNAL at a queue head blocks the queue until it
+                                   # fires; False: the signal is carried on the commands' done
     dma_row_bubble: int = 1        # realigner bubble per row
+    dma_cmd_gap: int = 4           # pipelined: cycles between two commands' data on one engine (measured)
     dma_coalesce: bool = False     # what-if: contiguous rows (ds = ss = row_bytes) merged into one row
     dma_max_bursts: int = 4        # outstanding bursts
     dma_max_beats: int = 256       # beats per burst
@@ -168,7 +174,8 @@ def op_class(c: isa.Cmd) -> str:
 
 # ---------------------------------------------------------------- per-command costs
 
-def _dma_cost(f, hw, tm):
+def _dma_cost(f, hw, tm, share=1):
+    """``share``: DMA engines moving data at the same time (they split the DDR bandwidth)."""
     rows, rb = f["rows"], f["row_bytes"]
     ds = f["ddr_stride"] or rb
     ss = (f["sp_stride"] * isa.LINE) or rb
@@ -184,13 +191,12 @@ def _dma_cost(f, hw, tm):
     # one burst per row at least (bursts never cross a row end), split at dma_max_beats and 4 KiB pages
     bursts = rows * (_cd(_cd(rb, BB), tm.dma_max_beats) + (a0 % 4096 + rb - 1) // 4096)
     lat = ddr_latency(hw)
-    port = min(BB, tm.axi_port_bytes) * tm.dma_masters
-    bpc = min(port, hw.ddr_bytes_per_cycle)
-    data = max(math.ceil(total / bpc), math.ceil(beats / tm.dma_masters),
-               (_cd(bursts, tm.dma_max_bursts) - 1) * lat)
+    port = min(BB, tm.axi_port_bytes)              # one engine's master
+    bpc = min(port, hw.ddr_bytes_per_cycle / share)
+    data = max(math.ceil(total / bpc), beats, (_cd(bursts, tm.dma_max_bursts) - 1) * lat)
     data += rows * tm.dma_row_bubble
     if tm.dma_pipelined:
-        return data, lat, {"ddr_bytes": total}
+        return data + tm.dma_cmd_gap, lat, {"ddr_bytes": total}
     return lat + data, 0, {"ddr_bytes": total}
 
 
@@ -305,13 +311,14 @@ def _vec_cost(c, hw, tm, resident):
     raise ModelError(op)
 
 
-def cost(c: isa.Cmd, hw: HwConfig, tm: RtlTiming | None = None, resident: bool = False):
+def cost(c: isa.Cmd, hw: HwConfig, tm: RtlTiming | None = None, resident: bool = False, share: int = 1):
     """(occupancy, latency, info) for one command; info carries ddr_bytes / macs. ``resident`` says the
-    command's SFU parameter block (LN block, GELU table, score record, LUT) is already loaded."""
+    command's SFU parameter block (LN block, GELU table, score record, LUT) is already loaded;
+    ``share`` how many DMA engines move data at once (DDR bandwidth split)."""
     tm = tm or timing_for(hw)
     f, op, na = c.f, c.op, hw.array_n
     if op in ("DMA_LOAD", "DMA_STORE"):
-        return _dma_cost(f, hw, tm)
+        return _dma_cost(f, hw, tm, share)
     if op in ("GEMM", "GEMM_GS"):
         M, N, K = f["M"], f["N"], f["K"]
         gs = op == "GEMM_GS"
@@ -412,7 +419,9 @@ def simulate(cmds, hw: HwConfig, trace=False, tm: RtlTiming | None = None) -> Ti
     lat = ddr_latency(hw)
     ev = _Events()
     E0 = (0, 0, None)
-    busy_until = [E0] * nq          # (time, event) engine free for the next command
+    busy_until = [E0] * nq          # (time, event) engine free for the next command (DMA: queue issue frontier)
+    nch = 2 if tm.dma_masters > 1 else 1
+    chan_busy = [E0] * nch          # DMA engines: (time, event) data stage free
     done_until = [E0] * nq          # (time, event) all issued commands of the queue have completed
     qissue = [deque() for _ in range(nq)]   # (issue time, event) of the last qdepth entries per queue
     busy = [0] * nq
@@ -463,12 +472,19 @@ def simulate(cmds, hw: HwConfig, trace=False, tm: RtlTiming | None = None) -> Ti
         if key is not None:
             res = tm.params_resident or key in resident
             resident[key] = True
-        occ, l, info = cost(c, hw, tm, resident=res)
+        dma = c.op in ("DMA_LOAD", "DMA_STORE")
+        ch = (c["chan"] & 1) if dma and nch == 2 else 0
+        if not dma:
+            occ, l, info = cost(c, hw, tm, resident=res)
         if c.op == "DMA_LOAD" and c["sp_buf"] == isa.PBUF and resident:
             lo, hi = c["sp_addr"], c["sp_addr"] + c["rows"] * max(c["sp_stride"] * isa.LINE, c["row_bytes"])
             for k2 in [k2 for k2 in resident if k2[0] < hi and lo < k2[1]]:
                 del resident[k2]
         cand = [(dt, de, "dispatch"), busy_until[q]]
+        if dma:
+            cand.append(chan_busy[ch])
+            if c.op == "DMA_STORE":         # fence: both channels done
+                cand += [done_until[q]]
         if c.op == "WAIT":
             s, k = c["sem"], c["count"]
             need = consumed.get(s, 0) + k
@@ -482,6 +498,9 @@ def simulate(cmds, hw: HwConfig, trace=False, tm: RtlTiming | None = None) -> Ti
             cand.append(done_until[q])
         cls = op_class(c)
         st, se = ev.add([(t, e, cls) for t, e, *_ in cand], trace)
+        if dma:
+            share = 2 if nch == 2 and chan_busy[1 - ch][0] > st else 1
+            occ, l, info = cost(c, hw, tm, share=share)
         qissue[q].append((st, se))
         if len(qissue[q]) > tm.qdepth:
             qissue[q].popleft()
@@ -493,8 +512,18 @@ def simulate(cmds, hw: HwConfig, trace=False, tm: RtlTiming | None = None) -> Ti
                 raise ModelError("semaphore with more than one producer queue")
             lst.append((ft, fe))
             max_out = max(max_out, len(lst) - consumed.get(c["sem"], 0))
-        busy_until[q] = (et, ee)
         ct, ce = ev.add([(et + l, ee, cls)], trace)
+        if dma:
+            chan_busy[ch] = (et, ee)
+            busy_until[q] = (st, se)        # the queue issues in order; the engines overlap
+            if c.op == "DMA_STORE":         # ...and no DMA command starts until the fence is done
+                chan_busy = [(ct, ce)] * nch
+            elif not tm.dma_pipelined:      # pre-SG10a: one command at a time per engine
+                chan_busy[ch] = (ct, ce) if nch == 2 else (et, ee)
+                if nch == 1:
+                    busy_until[q] = (et, ee)
+        else:
+            busy_until[q] = (et, ee)
         if ct >= done_until[q][0]:
             done_until[q] = (ct, ce)
         busy[q] += occ
@@ -587,11 +616,13 @@ def estimate(cfg, hw: HwConfig, batch=1, prefill_len=None, params=None, n_pos=5,
     return res
 
 
-# what-if fixes priced by bench/roofline.py (ADR-003 "bottlenecks")
+# the control plane before SG10a (one DMA engine, not pipelined, blocking SIGNAL): ADR-005 before/after
+PRE_SG10A = dict(dma_masters=1, dma_pipelined=False, signal_blocks=True)
+
+# what-if fixes priced by bench/roofline.py (ADR-003 "bottlenecks"). "DMA command pipelining" and
+# "second DMA master (2 HP ports)" are built (SG10a, ADR-005) and are part of every row now.
 FIXES = {
     "coalesce contiguous DMA rows": dict(dma_coalesce=True),
-    "DMA command pipelining": dict(dma_pipelined=True, signal_blocks=False),
-    "second DMA master (2 HP ports)": dict(dma_masters=2),
     "on-chip / prefetched command ring": dict(fetch_over_axi=False),
     "4-line (64 B) VEC engine ports": dict(vec_port_lines=4),
     "SFU second row buffer": dict(sfu_row_buffers=2),

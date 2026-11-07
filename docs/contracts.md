@@ -8,7 +8,7 @@ A contract changes only through an ADR in `docs/adr/` that updates this file, th
 Weight-stationary orientation: W is the stationary operand; A rows stream through; one output row per A row.
 
 ## C1b INT4 weights (W4A8)
-INT4 values in [-8, 7], packed two per byte along N: byte j of row k = `W[k,2j]` in bits [3:0], `W[k,2j+1]` in bits [7:4], two's complement. Product with INT8 activation is exact, same int32 accumulation as C1. Group scales are applied at requant time (per output channel / group mult+shift), never inside the array.
+INT4 values in [-8, 7], packed two per byte along N: byte j of row k = `W[k,2j]` in bits [3:0], `W[k,2j+1]` in bits [7:4], two's complement. Product with INT8 activation is exact, same int32 accumulation as C1. Per-output-channel scales are applied at requant time. Per-K-group uint8 scales (W4A8, GEMM_GS) are applied inside the array controller at each group flush per ADR-004: ACC = (acc ? ACC : 0) + gm[g,c]·psum_g[c].
 
 ## C2 Requantization (int32 -> int8 / int16)
 ```

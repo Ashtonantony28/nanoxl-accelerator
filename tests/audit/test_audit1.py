@@ -68,51 +68,65 @@ def test_a1_02_simbackend_slots_follow_rtl():
 
 # ----------------------------------------------------------------------------- A1-01
 def test_a1_01_vec_cost_respects_line_ports():
-    """A1-01 (fixed): the cycle model prices VEC-engine streams at the 16-byte line ports
-    (4 int32 / 8 int16 per cycle) and REQUANT's N record lines."""
+    """A1-01 (fixed): the cycle model prices VEC-engine streams at the port width, w 16-byte lines per
+    cycle (4w int32 / 8w int16), and REQUANT's N record lines (w per cycle). As built (SG10b) the
+    ports are 4 lines (64 bytes): at L = 64 int32 still runs at 16 elements per cycle, not 64."""
     L = KV260.lanes
     assert L == 64
+    assert cm.MEASURED.vec_port_lines == 4
     M, N = 16, 384
     rq = isa.C("REQUANT", out16=0, per_tensor=0, src_addr=0, dst_addr=0, param_addr=0, M=M, N=N,
                src_stride=96, dst_stride=24)
-    port_bound = M * (1 + math.ceil(4 * N / 16)) + N          # int32 lines per row + record lines
-    assert cm.cost(rq, KV260)[0] >= port_bound
     sm = isa.C("SOFTMAX_ONLINE", first=1, last=1, causal=1, src_addr=0, dst_addr=0, ctx_addr=0, rows=M,
                cols=256, diag=0, src_stride=64, dst_stride=16)
-    assert cm.cost(sm, KV260)[0] >= M * math.ceil(4 * 256 / 16)
+    for w in (1, 4):
+        tm = cm.MEASURED.with_(vec_port_lines=w)
+        pb = 16 * w
+        port_bound = M * (1 + math.ceil(4 * N / pb)) + math.ceil(16 * N / pb)   # int32 beats + record beats
+        assert cm.cost(rq, KV260, tm)[0] >= port_bound
+        assert cm.cost(sm, KV260, tm)[0] >= M * math.ceil(4 * 256 / pb)
+        if w == 4:
+            assert port_bound > M * math.ceil(N / L)                 # still port bound, not lane bound
 
 
 PERF = ROOT / "bench" / "results" / "vec_seq_perf.json"
 
 
+COLS = [(pl, L) for pl in ("pl1", "pl4") for L in ("4", "16", "64")]
+
+
 def _doc_perf_table():
-    """docs/vector-unit.md §9.3 measured table: {shape name: (occ L=4, L=16, L=64)}."""
+    """docs/vector-unit.md §9.3 measured table: {shape name: (occ PL=1 L=4, 16, 64, PL=4 L=4, 16, 64)}."""
     txt = (ROOT / "docs" / "vector-unit.md").read_text()
     sec = txt[txt.index("### 9.3"):txt.index("### 9.4")]
     out = {}
     for line in sec.splitlines():
-        m = re.match(r"\| (.+?) \| (\d+) \| (\d+) \| (\d+) \|", line)
+        m = re.match(r"\| (.+?) \|" + r" (\d+) \|" * 6, line)
         if m:
-            out[m.group(1)] = tuple(int(m.group(i)) for i in (2, 3, 4))
+            out[m.group(1)] = tuple(int(m.group(i)) for i in range(2, 8))
     return out
 
 
 def test_a1_01_cyclemodel_pinned_to_measured_vec_seq():
-    """A1-01 (fixed): every VEC-engine shape measured on rtl/vec_seq.sv (bench/vec_seq_perf.py, L = 4 and
-    16 on Icarus, 64 on Verilator; table in docs/vector-unit.md §9.3) is within 5 % of cyclemodel.cost,
-    and the doc table equals the measurement file."""
+    """A1-01 (fixed; re-measured for SG10b): every VEC-engine shape measured on rtl/vec_seq.sv
+    (bench/vec_seq_perf.py, L = 4 and 16 on Icarus, 64 on Verilator, with 1- and 4-line ports; table in
+    docs/vector-unit.md §9.3) is within 5 % of cyclemodel.cost at that port width, and the doc table
+    equals the measurement file. The 4-line ports cut REQUANT M16 N384 at L = 16 from 2001 to 559 cycles."""
     data = json.loads(PERF.read_text())
-    assert sorted(data) == ["16", "4", "64"]
+    assert sorted(data) == ["pl1", "pl4"] and all(sorted(v) == ["16", "4", "64"] for v in data.values())
     doc = _doc_perf_table()
-    assert len(doc) == len(data["4"]["rows"]) >= 30
-    for L, v in data.items():
+    assert len(doc) == len(data["pl1"]["4"]["rows"]) >= 30
+    for pl, L in COLS:
         hw = KV260.with_(lanes=int(L))
-        for r in v["rows"]:
-            assert doc[r["name"]][("4", "16", "64").index(L)] == r["occ"], (L, r["name"])
+        tm = cm.MEASURED.with_(vec_port_lines=int(pl[2:]))
+        for r in data[pl][L]["rows"]:
+            assert doc[r["name"]][COLS.index((pl, L))] == r["occ"], (pl, L, r["name"])
             c = isa.C(r["op"], **r["f"])
             resident = r["op"] in ("LN", "GELU", "SOFTMAX_ONLINE", "LUT_LOAD") and "miss" not in r["name"]
-            got = cm.cost(c, hw, resident=resident)[0]
-            assert abs(got / r["occ"] - 1) <= 0.05, (L, r["name"], got, r["occ"])
+            got = cm.cost(c, hw, tm, resident=resident)[0]
+            assert abs(got / r["occ"] - 1) <= 0.05, (pl, L, r["name"], got, r["occ"])
+    rq = {pl: next(r["occ"] for r in data[pl]["16"]["rows"] if r["name"] == "REQUANT M16 N384") for pl in data}
+    assert rq["pl4"] < 0.3 * rq["pl1"]
 
 
 # ----------------------------------------------------------------------------- A1-05 / A1-06

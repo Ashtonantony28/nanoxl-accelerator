@@ -4,7 +4,7 @@ import pytest
 
 from nanoxl import isa
 from nanoxl.compiler import Arena, CompileError, Compiler, Ring, relocate
-from nanoxl.cyclemodel import simulate
+from nanoxl.cyclemodel import RtlTiming, simulate
 from nanoxl.funcsim import check_hazards
 from nanoxl.graph import M25, SHAKESPEARE, TINY, build_gpt_graph, make_synthetic_params
 from nanoxl.hwconfig import KV260, PYNQ_Z2, KiB
@@ -106,7 +106,10 @@ def test_compiler_double_buffering_waits_two_panels_back():
     comp = Compiler(g, p, hw, max_rows=64)
     assert all(pn.nbytes == 512 for pn in comp.lin["fc"].panels)
     prog = comp.compile_step([(0, 64)])
-    tl = simulate(prog.cmds, hw, trace=True)
+    # an ordering test: idealized DMA timing (pipelined, non-blocking SIGNAL) so the 2-panel overlap
+    # shows; the measured-timing utilization is checked in test_compiler_decode_utilization_measured
+    ideal = RtlTiming(dma_coalesce=True, dma_pipelined=True, signal_blocks=False)
+    tl = simulate(prog.cmds, hw, trace=True, tm=ideal)
     t = {i: (s, e) for i, _, s, e in tl.trace}
     dma = [i for i, c in enumerate(prog.cmds) if c.op == "DMA_LOAD" and c["sp_buf"] == isa.WBUF]
     gemm = [i for i, c in enumerate(prog.cmds) if c.op == "GEMM"]
@@ -243,3 +246,24 @@ def test_compiler_from_bundle_graph():
     assert {op.param for op in g.ops if op.kind == "attn"} == {f"h{l}.attn" for l in range(4)}
     with pytest.raises(ValueError):
         from_bundle(A, dict(meta, quant=dict(meta["quant"], res_bits=8)))
+
+
+def test_compiler_decode_utilization_measured():
+    """Regression for the coalesced DMA emission: under the MEASURED RTL timing (one 128-bit DMA
+    master, 4 outstanding bursts, a realigner bubble per row) shakespeare decode on the KV260 keeps the
+    DMA port >= 85 % busy moving bytes, prefill keeps the array >= 70 % busy, and no compiled DMA moves
+    a contiguous transfer as several rows."""
+    from nanoxl.cyclemodel import estimate, timing_for
+    from nanoxl.graph import SHAKESPEARE
+    g = build_gpt_graph(SHAKESPEARE)
+    comp = Compiler(g, make_synthetic_params(g, 0), KV260)
+    for seqs in ([(100, 1)], [(0, 128)]):
+        for c in comp.compile_step(seqs).cmds:
+            if c.op in ("DMA_LOAD", "DMA_STORE") and c["rows"] > 1:
+                contig_sp = c["sp_stride"] in (0, c["row_bytes"] // 16) and c["row_bytes"] % 16 == 0
+                assert not (c["ddr_stride"] in (0, c["row_bytes"]) and contig_sp), c
+    r = estimate(SHAKESPEARE, KV260, n_pos=3)
+    port = timing_for(KV260).dma_beat_bytes
+    cycles = KV260.clock_hz / r["decode_tok_s"]
+    assert r["decode_ddr_MB_per_step"] * 1e6 / (port * cycles) > 0.85
+    assert r["prefill_array_util"] > 0.7

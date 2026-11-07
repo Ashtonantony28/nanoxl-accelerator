@@ -8,7 +8,7 @@ A contract changes only through an ADR in `docs/adr/` that updates this file, th
 Weight-stationary orientation: W is the stationary operand; A rows stream through; one output row per A row.
 
 ## C1b INT4 weights (W4A8)
-INT4 values in [-8, 7], packed two per byte along N: byte j of row k = `W[k,2j]` in bits [3:0], `W[k,2j+1]` in bits [7:4], two's complement. Product with INT8 activation is exact, same int32 accumulation as C1. Group scales are applied at requant time (per output channel / group mult+shift), never inside the array.
+INT4 values in [-8, 7], packed two per byte along N: byte j of row k = `W[k,2j]` in bits [3:0], `W[k,2j+1]` in bits [7:4], two's complement. Product with INT8 activation is exact, same int32 accumulation as C1. Per-output-channel scales are applied at requant time. Per-K-group uint8 scales (W4A8, GEMM_GS) are applied inside the array controller at each group flush per ADR-004: ACC = (acc ? ACC : 0) + gm[g,c]·psum_g[c].
 
 ## C2 Requantization (int32 -> int8 / int16)
 ```
@@ -22,11 +22,13 @@ out = clamp(y, -2^(B-1), 2^(B-1)-1),  B ∈ {8,16}
 - Saturation events must be countable in RTL (sticky counter per unit).
 
 ## C3 Systolic array port protocol
-Owned by SG2 (`rtl/array_ctrl.sv`, details and measurements in `docs/array.md`).
+Owned by SG2 (`rtl/array_ctrl.sv`, details and measurements in `docs/array.md`); `gs` added by
+SG7a per ADR-004 (additive: `cmd_gs = 0` behaves exactly as before).
 Clocking: single `clk`, synchronous active-low `rst_n` (reset clears all control state,
 weights and in-flight rows; accumulator contents are undefined after reset).
 Parameters: `N` (array N×N), `M_DEPTH` (accumulator rows, power of 2), `OF_DEPTH` (output
-FIFO, ≥ 2N+5 for full throughput; default 2N+8).
+FIFO, ≥ 2N+5 for full throughput; default 2N+8), `GM_DEPTH` (group-scale rows in flight,
+default N+4; any value ≥ 1 is correct, ≥ N+3 gives full throughput).
 
 **Handshake.** Every stream is valid/ready; a beat transfers on a rising edge with
 `valid && ready`. Producers must hold valid and data until the transfer. `ready` may depend
@@ -34,14 +36,19 @@ combinationally on other inputs (`cmd_ready` on `w_valid`).
 
 **Command** (`cmd_*`, one per weight tile): `m` ∈ [1, M_DEPTH] activation rows, `k` ∈ [1, N]
 weight rows (K extent), `n` ∈ [1, N] output columns, `abase` accumulator row base,
-`acc` (0: overwrite, 1: add into rows), `emit` (stream the resulting rows out), `int4`.
-Semantics: for m' in 0..m-1,
-`ACC[(abase+m') mod M_DEPTH][0..N-1] = (acc ? ACC[...] : 0) + A[m', 0..k-1] @ W[0..k-1, 0..N-1]`
-with W columns ≥ n treated as 0, exact INT32 (C1/C1b).
+`acc` (0: overwrite, 1: add into rows), `emit` (stream the resulting rows out), `int4`,
+`gs` (W4A8 group scales, ADR-004; only with `int4=1`).
+Semantics: for m' in 0..m-1, column c,
+`ACC[(abase+m') mod M_DEPTH][c] = (acc ? ACC[...][c] : 0) + s[c] · (A[m', 0..k-1] @ W[0..k-1, :])[c]`
+with W columns ≥ n treated as 0, exact INT32 (C1/C1b), where `s[c]` = 1 when `gs=0` and the
+uint8 multiplier of the scale beat when `gs=1` (the product is exact: |psum| ≤ N·2^10 for an INT4
+tile, so s·psum < 2^25).
 
-**Weight stream** (`w_data`, N×8 bits): exactly `k` beats per command, commands in order;
-beat r = W[r, :]. INT8: byte c = W[r,c]. INT4: nibble c (bits [4c+3:4c]) = W[r,c]
-(C1b order), upper N×4 bits ignored. Lanes c ≥ n are ignored.
+**Weight stream** (`w_data`, N×8 bits): exactly `k` beats per command (`k+1` when `gs=1`),
+commands in order; beat r = W[r, :]. INT8: byte c = W[r,c]. INT4: nibble c (bits [4c+3:4c]) =
+W[r,c] (C1b order), upper N×4 bits ignored. Lanes c ≥ n are ignored. With `gs=1`, beat 0 is the
+scale row (byte c = `s[c]`, uint8) and beats 1..k are the weight rows; the scale beat may be
+accepted while the previous tile still occupies the bank.
 
 **Activation stream** (`a_data`, N×8 bits): exactly `m` beats per command, in order;
 beat m' byte r = A[m', r]; bytes r ≥ k are ignored.
@@ -57,12 +64,15 @@ loaded while command i streams (double-buffered PE banks); a later command's `ac
 always sees the result of every earlier command on the same rows.
 
 **Timing** (no bubbles, `out_ready=1`): first `a` beat accepted → first `out` beat accepted
-= 2N+4 cycles; steady state max(m, k) cycles per command (one `w` and one `a` beat per
+= 2N+4 cycles (also with `gs=1`: the scale multiply sits in the existing RMW stage); steady
+state max(m, k) cycles per command, max(m, k+1) with `gs=1` (one `w` and one `a` beat per
 cycle, zero inter-tile bubbles). The core `systolic_array` alone has fixed latency
 2N-1 from `in_valid` to `out_valid` and never stalls.
 
 **Status.** `idle` = no command loading/issuing, no row in flight and no un-popped output.
-`hazard_seen` / `overflow_seen` are simulation-only sticky checkers (tied 0 in synthesis).
+`hazard_seen` / `overflow_seen` are simulation-only sticky checkers (tied 0 in synthesis);
+`overflow_seen` also covers the group-scale FIFO (overflow, or a `gs` row reaching the
+accumulator without its scale row).
 
 ## C4 Command ISA and DDR image format
 Owned by SG4; lives in `docs/isa.md` and `nanoxl/isa.py`.

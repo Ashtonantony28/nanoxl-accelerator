@@ -122,6 +122,7 @@ class TB:
         self.sat_base = [0] * 5   # RTL counter value when the bench's count started
         self.wrdy = 0
         self.checking = True
+        self.clr_now = False
         self.done_cycles = []
 
     async def start(self):
@@ -132,6 +133,9 @@ class TB:
         await self.hard_reset()
 
     async def hard_reset(self):
+        await FallingEdge(self.dut.clk)
+        for n in INPUTS:
+            getattr(self.dut, n).value = 0
         self.dut.rst_n.value = 0
         for p in self.ports:
             p.q.clear()
@@ -227,6 +231,8 @@ class TB:
         d = self.dut
         await FallingEdge(d.clk)
         self.cyc += 1
+        d.clr.value = 1 if self.clr_now else 0
+        self.clr_now = False
         # engine command port
         if self.holding is None and self.cmdq and not self.snoopq and self.rng.random() < self.p_cmd:
             self.holding = self.cmdq.popleft()
@@ -260,12 +266,20 @@ class TB:
             if self.checking:
                 self.check_done()
 
-    async def drain(self, max_cycles=3_000_000):
+    async def drain(self, max_cycles=300_000):
         """Run until every queued command is done."""
         n = 0
         while self.expect or self.cmdq or self.holding is not None or self.snoopq:
             await self.cycle()
             n += 1
+            if n == max_cycles - 1:
+                d = self.dut
+                info = {k: u(getattr(d, k)) for k in ("st", "ra_busy", "rb_busy", "wr_busy", "vu_busy", "ri",
+                                                    "s_nrows", "kind", "ld_idle", "vd_valid", "vd_ready")}
+                info["ra"] = {k: u(getattr(d.u_ra, k)) for k in ("inflight", "flush", "w_act", "act", "rows_left",
+                                                               "lines_left", "beats_left", "full", "ov")}
+                info["ld"] = {k: u(getattr(d.u_ld, k)) for k in ("inflight", "flush", "busy", "n_req", "n_rsp", "n_tot")}
+                d._log.error(f"deadlock state: {info}")
             assert n < max_cycles, f"timeout: {len(self.expect)} commands not done (deadlock?)"
         for _ in range(8):
             await self.cycle()

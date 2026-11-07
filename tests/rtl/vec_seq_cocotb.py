@@ -493,13 +493,12 @@ async def clear(tb, hard=False):
     tb.checking = False
     tb.cmdq.clear()
     tb.holding = None
+    tb.busy_clears = getattr(tb, "busy_clears", 0) + int(int(d.busy.value) == 1 and any(p.q for p in tb.ports))
     if hard:
         await tb.hard_reset()
     else:
-        await FallingEdge_(d)
-        d.clr.value = 1
-        await FallingEdge_(d)
-        d.clr.value = 0
+        tb.clr_now = True
+        await tb.cycle()
     tb.writes = []
     n0 = tb.dones
     for _ in range(60):
@@ -531,15 +530,20 @@ async def vec_seq_clear_mid_command(dut):
     g = Gen(tb, rng)
     g.setup()
     await tb.drain()
-    for trial in range(6):
+    for trial in range(9):
         long_cmds = [g.ln(), g.vec(), g.requant(), g.softmax(), g.gelu()]
         c = long_cmds[trial % len(long_cmds)]
         tb.checking = False
         tb.cmdq.append(word(c))
         tb.cmdq.append(word(g.vec()))
-        for _ in range(rng.randrange(5, 300)):
+        wait = rng.randrange(5, 200)
+        for _ in range(5000):           # a random point at which reads are in flight
             await tb.cycle()
+            wait -= 1
+            if wait <= 0 and int(dut.busy.value) == 1 and any(p.q for p in tb.ports):
+                break
         await clear(tb, hard=(trial % 3 == 2))
+        dut._log.info(f"trial {trial}: cleared during {c.op} at cycle {tb.cyc}")
         for t in range(3):
             tb.add(isa.C("LUT_LOAD", table=t, src_addr=P_LUT + 512 * t))
         cmds = [g.any() for _ in range(4)]
@@ -548,6 +552,7 @@ async def vec_seq_clear_mid_command(dut):
         await tb.drain()
         tb.compare_all()
         assert tb.err() == (0, 0)
+    assert tb.busy_clears >= 5, f"only {tb.busy_clears} clears hit a command with reads in flight"
 
 
 @cocotb.test()

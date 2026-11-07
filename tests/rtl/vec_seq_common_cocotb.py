@@ -2,8 +2,10 @@
 
 The bench plays the command processor (engine port, random valid gaps) and the scratchpads:
 five byte-addressed buffers (KV260 sizes, the same arrays nanoxl.funcsim uses) behind three
-16-byte line read ports (A, B, P) with random ready, random in-order latency 1..LAT and the
-16-line credit checked, and one line write port with random ready and byte strobes. PBUF
+read ports (A, B, P) of PL 16-byte lines per beat (env PL, = the RTL parameter; a beat may
+start at any line and wraps at the buffer end like buf_spad) with random ready, random
+in-order latency 1..LAT and the 16-beat credit checked, and one PL-line write port with
+random ready and byte strobes (lines without a strobe may lie past the buffer end). PBUF
 writes made by the bench (the DMA's role) are reported on the snoop port.
 
 Reference: nanoxl.funcsim.FuncSim, stepped over the same commands. Checks, per command at
@@ -27,6 +29,7 @@ from nanoxl.funcsim import FuncSim, accesses
 from nanoxl.hwconfig import KV260
 
 L = int(os.environ.get("L", "4"))
+PL = int(os.environ.get("PL", "1"))
 LINE = 16
 BUFS = (isa.ABUF, isa.WBUF, isa.ACC, isa.PBUF, isa.KVBUF)
 # saturation counter index (vec_seq sat_cnt): 0 requant, 1 ALU, 2 LN out, 3 LN z, 4 softmax score
@@ -81,7 +84,7 @@ class ReadPort:
         self.arready.value = self.rdy
         self.resp = bool(self.q) and self.q[0][0] <= cyc
         self.rvalid.value = 1 if self.resp else 0
-        self.rdata.value = self.q[0][1] if self.resp else tb.rng.getrandbits(128)
+        self.rdata.value = self.q[0][1] if self.resp else tb.rng.getrandbits(128 * PL)
 
     def sample(self, cyc):
         tb = self.tb
@@ -91,13 +94,15 @@ class ReadPort:
             b = self.fixed if self.fixed is not None else u(self.arbuf)
             a = u(self.araddr)
             m = tb.mem[b]
-            assert (a + 1) * LINE <= len(m), f"read past {isa.BUF_NAMES[b]}: line {a}"
-            data = int.from_bytes(m[a * LINE:(a + 1) * LINE].tobytes(), "little")
+            nl = len(m) // LINE
+            assert a < nl, f"read past {isa.BUF_NAMES[b]}: line {a}"
+            lines = [(a + j) % nl for j in range(PL)]
+            data = int.from_bytes(b"".join(m[x * LINE:(x + 1) * LINE].tobytes() for x in lines), "little")
             due = max(cyc + tb.rng.randint(1, tb.lat), self.last_due + 1)
             self.last_due = due
             self.q.append((due, data))
             self.reads += 1
-            assert len(self.q) <= 16, "more than 16 lines in flight on a read port"
+            assert len(self.q) <= 16, "more than 16 beats in flight on a read port"
             tb.port_log.append((b, a))
 
 
@@ -252,14 +257,19 @@ class TB:
         for p in self.ports:
             p.sample(self.cyc)
         if self.wrdy and d.wd_valid.value == 1:
-            b, a, strb = u(d.wd_buf), u(d.wd_addr), u(d.wd_strb)
-            data = u(d.wd_data).to_bytes(16, "little")
+            b, a, strb_all = u(d.wd_buf), u(d.wd_addr), u(d.wd_strb)
+            data_all = u(d.wd_data).to_bytes(16 * PL, "little")
             m = self.mem[b]
-            assert (a + 1) * LINE <= len(m), f"write past {isa.BUF_NAMES[b]}: line {a}"
-            for i in range(16):
-                if strb >> i & 1:
-                    m[a * LINE + i] = data[i]
-            self.writes.append((b, a, strb))
+            for j in range(PL):
+                strb = (strb_all >> (16 * j)) & 0xFFFF
+                if not strb:
+                    continue
+                aj, data = a + j, data_all[16 * j:16 * (j + 1)]
+                assert (aj + 1) * LINE <= len(m), f"write past {isa.BUF_NAMES[b]}: line {aj}"
+                for i in range(16):
+                    if strb >> i & 1:
+                        m[aj * LINE + i] = data[i]
+                self.writes.append((b, aj, strb))
         if d.done.value == 1:
             self.dones += 1
             self.done_cycles.append(self.cyc)

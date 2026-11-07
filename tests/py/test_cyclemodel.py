@@ -72,32 +72,41 @@ def test_cyclemodel_ragged_weight_rows():
 
 
 def test_cyclemodel_sfu_costs_measured():
-    """VEC-engine costs = port/lane stream + fitted fixed costs (VEC_CAL); the full comparison with
-    every measured shape is tests/audit (A1-01) against bench/results/vec_seq_perf.json."""
-    hw = KV260  # 64 lanes, 16-byte ports
-    cal = VEC_CAL[64]
+    """VEC-engine costs = port/lane stream + fitted fixed costs (VEC_CAL[port lines][lanes]); the full
+    comparison with every measured shape is tests/audit (A1-01) against bench/results/vec_seq_perf.json."""
+    assert MEASURED.vec_port_lines == 4                     # nanoxl_top VP = 4 as built (SG10b)
+    hw = KV260  # 64 lanes
+    t16 = MEASURED.with_(vec_port_lines=1)                  # the earlier 16-byte ports
+    cost16 = lambda c, **kw: cost(c, hw, t16, **kw)
+    cal = VEC_CAL[1][64]
     H, Hw, f, F = cal["ln"]
     nb, il = 6, 48                                   # LN 384 int16: 6 beats, 48 input lines
     p1 = il - (8 + H)                              # one beat (8 lines) + H hidden behind the previous row
     p3 = max(nb, 24 - Hw)
     blk = (2 + 384 // 8 + 384 // 4) + 1
-    assert cost(C("LN", rows=4, cols=384, in16=1), hw, resident=True)[0] == F + 4 * (1 + p1 + nb + p3 + f)
-    assert cost(C("LN", rows=4, cols=384, in16=1), hw)[0] == F + 4 * (1 + p1 + nb + p3 + f) + blk
-    # REQUANT at L = 64 is port bound: 4 int32 per cycle and one record line per channel
+    assert cost16(C("LN", rows=4, cols=384, in16=1), resident=True)[0] == F + 4 * (1 + p1 + nb + p3 + f)
+    assert cost16(C("LN", rows=4, cols=384, in16=1))[0] == F + 4 * (1 + p1 + nb + p3 + f) + blk
+    # REQUANT at L = 64 with 16-byte ports is port bound: 4 int32 per cycle and one record line per channel
     rq = C("REQUANT", M=16, N=384)
-    assert cost(rq, hw)[0] == 384 + 2 * cal["rq_chunk"] + 16 * (1 + 64) + 16 * (1 + 32)
-    assert cost(C("REQUANT", M=16, N=384, per_tensor=1), hw)[0] == 2 + 2 * cal["rq_chunk"] + 16 * (65 + 33)
+    assert cost16(rq)[0] == 384 + 2 * cal["rq_chunk"] + 16 * (1 + 64) + 16 * (1 + 32)
+    assert cost16(C("REQUANT", M=16, N=384, per_tensor=1))[0] == 2 + 2 * cal["rq_chunk"] + 16 * (65 + 33)
     assert cost(C("LUT_LOAD", table=1), hw)[0] == 40
     assert cost(C("LUT_LOAD", table=1), hw, resident=True)[0] == 6
-    assert cost(C("GELU", len=640), hw)[0] == cal["gelu"] + 1 + 40 + 17
-    assert cost(C("VEC", len=1000, dt_in=isa.DT_I32, dt_out=isa.DT_I32), hw)[0] == cal["vec"] + 1 + 250
+    assert cost16(C("GELU", len=640))[0] == cal["gelu"] + 1 + 40 + 17
+    assert cost16(C("VEC", len=1000, dt_in=isa.DT_I32, dt_out=isa.DT_I32))[0] == cal["vec"] + 1 + 250
+    # as built (64-byte ports): 16 int32 / 4 records per cycle; the GELU table still goes through the
+    # SFU's 16-byte cfg port (17 cycles); int8 streams reach the 64 lanes
+    c4 = VEC_CAL[4][64]
+    assert cost(rq, hw)[0] == 96 + 2 * c4["rq_chunk"] + 16 * (1 + 16) + 16 * (1 + 8)
+    assert cost(C("GELU", len=640), hw)[0] == c4["gelu"] + 1 + 10 + 17
+    assert cost(C("VEC", len=1000, dt_in=isa.DT_I32, dt_out=isa.DT_I32), hw)[0] == c4["vec"] + 1 + 63
+    assert cost(rq, hw)[0] < 0.4 * cost16(rq)[0]
     # L = 4: lane bound everywhere; LN d=384 is 3 nb + 19 cycles per row (+ accept), as sfu.md §5
     hw4 = KV260.with_(lanes=4)
-    H4, _, f4, F4 = VEC_CAL[4]["ln"]
-    assert cost(C("LN", rows=2, cols=384, in16=1), hw4, resident=True)[0] == F4 + 2 * (1 + 3 * 96 + f4)
-    # wider ports (what-if) remove the port bound at L = 64
-    w4 = MEASURED.with_(vec_port_lines=4)
-    assert cost(rq, hw, w4)[0] < 0.4 * cost(rq, hw)[0]
+    for w in (1, 4):
+        H4, _, f4, F4 = VEC_CAL[w][4]["ln"]
+        assert cost(C("LN", rows=2, cols=384, in16=1), hw4, MEASURED.with_(vec_port_lines=w),
+                    resident=True)[0] == F4 + 2 * (1 + 3 * 96 + f4)
     # ping-pong row buffer (what-if) overlaps pass 1 of the next row
     pp = cost(C("LN", rows=4, cols=384, in16=1), hw, MEASURED.with_(sfu_row_buffers=2), resident=True)[0]
     assert pp < cost(C("LN", rows=4, cols=384, in16=1), hw, resident=True)[0]
@@ -190,25 +199,31 @@ def shk():
 def test_cyclemodel_shakespeare_measured(shk):
     """As built (wave 2 RTL + coalesced compiler DMAs), KV260 INT8 decode is bound by the single
     128-bit DMA master (16 B/cycle = 4 GB/s at 250 MHz), half the 8 GB/s board assumption: the
-    critical path is almost all weight DMA. Prefill is mostly array bound; with the VEC engine priced at
-    its 16-byte line ports (AUDIT-1 A1-01) the array is ~65 % busy, still above G3's 50 %."""
+    critical path is almost all weight DMA. Prefill is mostly array bound: with the VEC engine's
+    64-byte ports (SG10b; 16-byte ports gave ~65 %, AUDIT-1 A1-01) the array is ~78 % busy, 14.7 ms for
+    the 256-token prompt. Softmax (int32 scores, still 16 per cycle at L = 64) is the next VEC term."""
     assert shk["fits"]
     port_bound = 16 * KV260.clock_hz / SHAKESPEARE.weight_bytes
     assert 0.85 * port_bound < shk["decode_tok_s"] <= port_bound
     assert shk["decode_tok_s"] < 0.55 * shk["weight_bound_tok_s"]
     assert shk["decode_critical"]["dma weights"] > 0.85 * shk["decode_cycles"]
     assert shk["prefill_critical"]["gemm linear"] > 0.6 * shk["prefill_cycles"]
-    assert 0.5 < shk["prefill_array_util"] < 0.75
-    assert shk["prefill_critical"]["softmax"] > 0.08 * shk["prefill_cycles"]   # int32 scores, 4 per cycle
+    assert 0.75 < shk["prefill_array_util"] < 0.85
+    assert 14.0 < shk["prefill_ms"] < 15.5
+    assert shk["prefill_critical"]["gemm linear"] > 0.7 * shk["prefill_cycles"]
+    assert 0.05 * shk["prefill_cycles"] < shk["prefill_critical"]["softmax"] < 0.1 * shk["prefill_cycles"]
 
 
 def test_cyclemodel_vec_port_widening_restores_prefill(shk):
-    """What-if (ADR-003 AUDIT-1 update): 4-line (64-byte) VEC engine ports bring KV260 prefill back
-    near the lane-rate model (~0.8 array utilization); decode does not move."""
-    tm = timing_for(KV260).with_(**FIXES["4-line (64 B) VEC engine ports"])
-    w = estimate(SHAKESPEARE, KV260, n_pos=3, tm=tm)
-    assert w["prefill_array_util"] > 0.75 and w["prefill_ms"] < 0.9 * shk["prefill_ms"]
-    assert abs(w["decode_tok_s"] / shk["decode_tok_s"] - 1) < 0.01
+    """SG10b built the ADR-003 / AUDIT-1 what-if: 4-line (64-byte) VEC engine ports are the default, so
+    the fix is a no-op now; the earlier 16-byte ports (vec_port_lines = 1) cost ~20 % prefill
+    (17.6 vs 14.7 ms on KV260 shakespeare, array ~65 % busy); decode does not move."""
+    tm = timing_for(KV260)
+    assert tm.vec_port_lines == FIXES["4-line (64 B) VEC engine ports"]["vec_port_lines"]
+    old = estimate(SHAKESPEARE, KV260, n_pos=3, tm=tm.with_(vec_port_lines=1))
+    assert shk["prefill_array_util"] > 0.75 and shk["prefill_ms"] < 0.9 * old["prefill_ms"]
+    assert 0.55 < old["prefill_array_util"] < 0.72
+    assert abs(old["decode_tok_s"] / shk["decode_tok_s"] - 1) < 0.01
 
 
 def test_cyclemodel_fixes_order(shk):
@@ -264,41 +279,47 @@ def test_cyclemodel_timing_is_frozen_dataclass():
         MEASURED.qdepth = 4
 
 
-def _top_measured():
-    """docs/top.md §6: measured PERF_CYCLES of nanoxl_top (N=16, L=16, tiny, Verilator) per bundle/KV:
-    (prefill 16 rows, decode min, decode max)."""
+def _top_measured(vp=4):
+    """docs/top.md §6: measured PERF_CYCLES of nanoxl_top (N=16, L=16, tiny, Verilator) per bundle/KV at
+    VEC port width vp (4 as built; 1 = the 16-byte ports): (prefill 16 rows, decode min, decode max)."""
     import re
     from pathlib import Path
     txt = (Path(__file__).resolve().parents[2] / "docs" / "top.md").read_text()
     sec = txt[txt.index("## 6. Performance"):]
     out = {}
-    for m in re.finditer(r"\| (W[48]A8), (on-chip|DDR KV) \| ([\d,]+) / [\d,]+ [^|]*\| ([\d,]+)–([\d,]+) / ", sec):
+    tag = "" if vp == 4 else f", VP = {vp}"
+    for m in re.finditer(r"\| (W[48]A8), (on-chip|DDR KV)" + re.escape(tag) +
+                         r" \| ([\d,]+) / [\d,]+ [^|]*\| ([\d,]+)–([\d,]+) / ", sec):
         n = lambda s: int(s.replace(",", ""))
         out[(m.group(1).lower(), m.group(2) == "on-chip")] = (n(m.group(3)), n(m.group(4)), n(m.group(5)))
     return out
 
 
 @pytest.mark.parametrize("bundle", ["w8a8", "w4a8"])
-@pytest.mark.parametrize("kv_onchip", [True, False], ids=["onchip", "ddrkv"])
-def test_cyclemodel_matches_measured_top_level(bundle, kv_onchip):
-    """Whole-program check against the RTL top level (docs/top.md §6, SG7c): the same compiled tiny
-    programs at N=16, L=16 with the test instance's buffers; the model is within 10 % of the measured
-    prefill (16 rows) and decode (pos 16 and 23) cycles. Before A1-01 prefill was 13-20 % low."""
+@pytest.mark.parametrize("kv_onchip,vp", [(True, 4), (False, 4), (True, 1)], ids=["onchip", "ddrkv", "onchip-vp1"])
+def test_cyclemodel_matches_measured_top_level(bundle, kv_onchip, vp):
+    """Whole-program check against the RTL top level (docs/top.md §6, SG7c / SG10b): the same compiled
+    tiny programs at N=16, L=16 with the test instance's buffers and VEC port width; the model is within
+    10 % of the measured prefill (16 rows) and decode (pos 16 and 23) cycles. Before A1-01 prefill was
+    13-20 % low."""
     from pathlib import Path
     from nanoxl.compiler import Compiler
     from nanoxl.export import load_bundle
     from nanoxl.graph import from_bundle
     from nanoxl.hwconfig import KiB
-    meas = _top_measured()
-    assert len(meas) == 4, meas
+    meas = _top_measured(vp)
+    assert len(meas) == (4 if vp == 4 else 2), meas
     pre_m, dec_lo, dec_hi = meas[(bundle, kv_onchip)]
     hw = KV260.with_(array_n=16, lanes=16, kv_onchip=kv_onchip, abuf=64 * KiB, wbuf=32 * KiB, acc=64 * KiB,
                      pbuf=32 * KiB, kvbuf=128 * KiB)            # tests/rtl/top_cocotb.top_hw
     g, p = from_bundle(*load_bundle(Path(__file__).resolve().parents[2] / "artifacts" / "models" / "tiny"
                                     / f"{bundle}.npz"))
     comp = Compiler(g, p, hw)
-    pre = simulate(comp.compile_step([(0, 16)]).cmds, hw).cycles
+    tm = MEASURED.with_(vec_port_lines=vp)
+    pre = simulate(comp.compile_step([(0, 16)]).cmds, hw, tm=tm).cycles
     assert abs(pre / pre_m - 1) < 0.10, (pre, pre_m)
+    if vp == 1:                                   # the 4-line ports cut measured prefill >= 10 %
+        assert _top_measured(4)[(bundle, kv_onchip)][0] < 0.91 * pre_m
     for pos in (16, 23):
-        dec = simulate(comp.compile_step([(pos, 1)]).cmds, hw).cycles
+        dec = simulate(comp.compile_step([(pos, 1)]).cmds, hw, tm=tm).cycles
         assert 0.9 * dec_lo < dec < 1.1 * dec_hi, (pos, dec, dec_lo, dec_hi)

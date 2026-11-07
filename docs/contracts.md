@@ -125,3 +125,6 @@ Defined as this exact 3-pass over the whole row (an online variant is not bit-id
 **GELU**: `out = lut[x & 0xFF]` (int8 in, int8 out), one 256-entry table per layer.
 
 **Saturation events** (each countable): every requant clamp, both residual adds, LN `z` (step 6) and LN out (step 7). Softmax and the SFUs cannot overflow by construction (bounds above).
+
+## C6 DMA channels and ordering (ADR-005)
+DMA commands go to engine `chan[0]` (ch0 `md_axi`/HP0, ch1 `md1_axi`/HP1). Each channel completes in order. DMA_STORE waits for both channels to drain and runs alone. A DMA SIGNAL fires after all earlier DMA commands on both channels are done, and a DMA WAIT holds both. Overlapping cross-channel writes not ordered by these are illegal and rejected by `funcsim.check_hazards`.

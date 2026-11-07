@@ -10,8 +10,9 @@
 # Block design:
 #   processing_system7_0 M_AXI_GP0 --smc_ctrl--> nanoxl_0/s_axi_ctrl   0x4000_0000, 4 KiB (CSRs)
 #                                  \----------> axi_intc_0/s_axi        0x4180_0000, 4 KiB
-#   nanoxl_0/m_axi_mf (fetch, 128 b) --smc_mf--> S_AXI_HP0 (64 bit) -> DDR
-#   nanoxl_0/m_axi_md (DMA, 128 b)   --smc_md--> S_AXI_HP1 (64 bit) -> DDR   (SmartConnect downsizes)
+#   nanoxl_0/m_axi_mf  (fetch, 128 b) --+
+#   nanoxl_0/m_axi_md  (DMA ch 0)     --smc_hp0 (2:1)--> S_AXI_HP0 (64 bit) -> DDR   (ADR-005 §4;
+#   nanoxl_0/m_axi_md1 (DMA ch 1)     --smc_md1------> S_AXI_HP1 (64 bit) -> DDR    SmartConnect downsizes)
 #   nanoxl_0/irq -> axi_intc_0 -> IRQ_F2P[0]
 #   FCLK_CLK0 = 150 MHz requested (the PS PLLs give the nearest value; PYNQ reprograms it from the .hwh).
 
@@ -70,10 +71,10 @@ set nx   [nx_add_core $NX_PARAMS]
 set rst  [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset proc_sys_reset_0]
 set smc  [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smc_ctrl]
 set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $smc
-set smf  [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smc_mf]
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smf
-set smd  [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smc_md]
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smd
+set shp0 [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smc_hp0]
+set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $shp0
+set smd1 [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smc_md1]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smd1
 set intc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_intc axi_intc_0]
 set_property -dict [list CONFIG.C_IRQ_CONNECTION {1}] $intc
 
@@ -83,21 +84,22 @@ connect_bd_net $clk \
     [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] \
     [get_bd_pins processing_system7_0/S_AXI_HP1_ACLK] \
     [get_bd_pins nanoxl_0/aclk] [get_bd_pins proc_sys_reset_0/slowest_sync_clk] \
-    [get_bd_pins smc_ctrl/aclk] [get_bd_pins smc_mf/aclk] [get_bd_pins smc_md/aclk] \
+    [get_bd_pins smc_ctrl/aclk] [get_bd_pins smc_hp0/aclk] [get_bd_pins smc_md1/aclk] \
     [get_bd_pins axi_intc_0/s_axi_aclk]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins proc_sys_reset_0/ext_reset_in]
 connect_bd_net [get_bd_pins proc_sys_reset_0/interconnect_aresetn] \
-    [get_bd_pins smc_ctrl/aresetn] [get_bd_pins smc_mf/aresetn] [get_bd_pins smc_md/aresetn]
+    [get_bd_pins smc_ctrl/aresetn] [get_bd_pins smc_hp0/aresetn] [get_bd_pins smc_md1/aresetn]
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] \
     [get_bd_pins nanoxl_0/aresetn] [get_bd_pins axi_intc_0/s_axi_aresetn]
 
 connect_bd_intf_net [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smc_ctrl/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins smc_ctrl/M00_AXI] [get_bd_intf_pins nanoxl_0/s_axi_ctrl]
 connect_bd_intf_net [get_bd_intf_pins smc_ctrl/M01_AXI] [get_bd_intf_pins axi_intc_0/s_axi]
-connect_bd_intf_net [get_bd_intf_pins nanoxl_0/m_axi_mf] [get_bd_intf_pins smc_mf/S00_AXI]
-connect_bd_intf_net [get_bd_intf_pins smc_mf/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
-connect_bd_intf_net [get_bd_intf_pins nanoxl_0/m_axi_md] [get_bd_intf_pins smc_md/S00_AXI]
-connect_bd_intf_net [get_bd_intf_pins smc_md/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP1]
+connect_bd_intf_net [get_bd_intf_pins nanoxl_0/m_axi_mf] [get_bd_intf_pins smc_hp0/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins nanoxl_0/m_axi_md] [get_bd_intf_pins smc_hp0/S01_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_hp0/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
+connect_bd_intf_net [get_bd_intf_pins nanoxl_0/m_axi_md1] [get_bd_intf_pins smc_md1/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_md1/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP1]
 
 connect_bd_net [get_bd_pins nanoxl_0/irq] [get_bd_pins axi_intc_0/intr]
 connect_bd_net [get_bd_pins axi_intc_0/irq] [get_bd_pins processing_system7_0/IRQ_F2P]
@@ -107,7 +109,8 @@ assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0
     -offset $CSR_BASE -range 4K [get_bd_addr_segs nanoxl_0/s_axi_ctrl/*]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
     -offset $INTC_BASE -range 4K [get_bd_addr_segs axi_intc_0/S_AXI/*]
-nx_map_master nanoxl_0/m_axi_mf processing_system7_0/S_AXI_HP0 *DDR*
-nx_map_master nanoxl_0/m_axi_md processing_system7_0/S_AXI_HP1 *DDR*
+nx_map_master nanoxl_0/m_axi_mf  processing_system7_0/S_AXI_HP0 *DDR*
+nx_map_master nanoxl_0/m_axi_md  processing_system7_0/S_AXI_HP0 *DDR*
+nx_map_master nanoxl_0/m_axi_md1 processing_system7_0/S_AXI_HP1 *DDR*
 
 nx_finish $PROJ $BD $opt

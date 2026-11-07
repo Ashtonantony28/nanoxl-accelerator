@@ -7,9 +7,10 @@
 Steps (each prints PASS/FAIL and stops at the first failure):
   1 csr        ID / VERSION, RING_BASE / RING_SIZE / IRQ_EN write-read-back, STATUS sane
   2 end        a program of one END: END_COUNT advances, IRQ_STATUS bit 0 set, W1C clears it
-  3 dma        loopback through every scratchpad (ABUF, WBUF, ACC, PBUF, KVBUF): random bytes DMA_LOAD'ed
-               from DDR and DMA_STORE'd back to another DDR area are unchanged
-  4 bandwidth  a 1 MiB DMA_LOAD and a 1 MiB DMA_STORE; PL DDR bandwidth from PERF_CYCLES at the board clock
+  3 dma        loopback through every scratchpad (ABUF, WBUF, ACC, PBUF, KVBUF) on both DMA channels: random
+               bytes DMA_LOAD'ed from DDR and DMA_STORE'd back to another DDR area are unchanged
+  4 bandwidth  1 MiB DMA_LOADs on channel 0, channel 1 and both at once, a 1 MiB DMA_STORE; PL DDR
+               bandwidth from PERF_CYCLES at the board clock
   5 layer      one step of a 1-layer cut of tiny W8A8 (GEMM, REQUANT, LN, softmax, GELU): logits == nanoxl.golden
   6 generate   the full tiny W8A8 model: reference prompt + `--n` greedy tokens == golden_ref.json
 The scratch DDR of steps 3-4 is the top 2 MiB of the image's 4 MiB command ring (the steps' own programs
@@ -99,37 +100,47 @@ def step_dma(be, dev, nbytes=16384):
     rng = np.random.default_rng(7)
     caps = {isa.ABUF: dev.comp.hw.abuf, isa.WBUF: dev.comp.hw.wbuf, isa.ACC: dev.comp.hw.acc,
             isa.PBUF: dev.comp.hw.pbuf, isa.KVBUF: dev.comp.hw.kvbuf}
-    for buf, cap in caps.items():
+    for (buf, cap), (lch, sch) in zip(caps.items(), ((0, 1), (1, 0), (0, 0), (1, 1), (0, 1))):
+        # both DMA channels (md_axi = chan 0, md1_axi = chan 1, ADR-005) load and store
         n = min(nbytes, cap)
         src = rng.integers(0, 256, n, dtype=np.uint8)
         dev.mem[off:off + n] = src
         dev.mem[off + MiB:off + MiB + n] = 0
         be.flush()
         sp = cap - n                                   # top of the buffer: exercises the high line addresses
-        run_prog(dev, [isa.C("DMA_LOAD", chan=0, sp_buf=buf, sp_addr=sp, ddr_addr=ddr, rows=1, row_bytes=n,
+        run_prog(dev, [isa.C("DMA_LOAD", chan=lch, sp_buf=buf, sp_addr=sp, ddr_addr=ddr, rows=1, row_bytes=n,
                              ddr_stride=n, sp_stride=0),
-                       isa.C("DMA_STORE", chan=0, sp_buf=buf, sp_addr=sp, ddr_addr=ddr + MiB, rows=1, row_bytes=n,
+                       isa.C("DMA_STORE", chan=sch, sp_buf=buf, sp_addr=sp, ddr_addr=ddr + MiB, rows=1, row_bytes=n,
                              ddr_stride=n, sp_stride=0)])
         be.invalidate()
         got = np.asarray(dev.mem[off + MiB:off + MiB + n])
         bad = np.flatnonzero(got != src)
-        check(not len(bad), f"{isa.BUF_NAMES[buf]}: {len(bad)} of {n} bytes differ, first at {bad[:1].tolist()}")
-    return f"{nbytes} B through each of ABUF WBUF ACC PBUF KVBUF"
+        check(not len(bad), f"{isa.BUF_NAMES[buf]} (load ch{lch}, store ch{sch}): {len(bad)} of {n} bytes "
+                            f"differ, first at {bad[:1].tolist()}")
+    return f"{nbytes} B through each of ABUF WBUF ACC PBUF KVBUF, both DMA channels"
 
 
 def step_bandwidth(be, dev, mhz):
     off, ddr = _scratch(dev)
     out = []
-    for op in ("DMA_LOAD", "DMA_STORE"):
-        dev.clear_counters()
+
+    def mib(op, ch, base):
         # 16 rows of 64 KiB from consecutive DDR; on chip the rows overlap (sp_stride = 1 line), so the
         # transfer fits every ABUF size
-        run_prog(dev, [isa.C(op, chan=0, sp_buf=isa.ABUF, sp_addr=0, ddr_addr=ddr, rows=16, row_bytes=65536,
-                             ddr_stride=65536, sp_stride=1)])
+        return isa.C(op, chan=ch, sp_buf=isa.ABUF, sp_addr=0, ddr_addr=base, rows=16, row_bytes=65536,
+                     ddr_stride=65536, sp_stride=1)
+
+    cases = [("load ch0", [mib("DMA_LOAD", 0, ddr)]), ("load ch1", [mib("DMA_LOAD", 1, ddr)]),
+             ("load ch0+ch1", [mib("DMA_LOAD", 0, ddr), mib("DMA_LOAD", 1, ddr + MiB)]),
+             ("store ch0", [mib("DMA_STORE", 0, ddr)])]
+    for name, cmds in cases:
+        dev.clear_counters()
+        run_prog(dev, cmds)
         p = dev.perf()
-        check(p["bytes"] == MiB, f"{op}: PERF_BYTES {p['bytes']} != {MiB}")
-        gbs = MiB / max(p["cycles"], 1) * mhz * 1e6 / 1e9
-        out.append(f"{op.split('_')[1].lower()} {gbs:.2f} GB/s ({p['cycles']} cycles)")
+        nb = MiB * len(cmds)
+        check(p["bytes"] == nb, f"{name}: PERF_BYTES {p['bytes']} != {nb}")
+        gbs = nb / max(p["cycles"], 1) * mhz * 1e6 / 1e9
+        out.append(f"{name} {gbs:.2f} GB/s")
     return ", ".join(out)
 
 

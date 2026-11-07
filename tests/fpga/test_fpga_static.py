@@ -69,24 +69,27 @@ def test_build_tcl_dry_run(board, tmp_path):
         ps = cell_config(lines, "zynq_ultra_ps_e_0")
         assert float(ps["PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ"]) == boards.CLOCK_MHZ[board]
         assert ps["PSU__SAXIGP2__DATA_WIDTH"] == ps["PSU__SAXIGP3__DATA_WIDTH"] == "128"
-        hp = ("S_AXI_HP0_FPD", "S_AXI_HP1_FPD")
+        assert ps["PSU__SAXIGP0__DATA_WIDTH"] == "128"
+        hp = {"m_axi_mf": ("smc_mf", "S_AXI_HPC0_FPD"), "m_axi_md": ("smc_md", "S_AXI_HP0_FPD"),
+              "m_axi_md1": ("smc_md1", "S_AXI_HP1_FPD")}
         assert "zynq_ultra_ps_e_0/pl_ps_irq0" in log
     else:
         ps = cell_config(lines, "processing_system7_0")
         assert float(ps["PCW_FPGA0_PERIPHERAL_FREQMHZ"]) == boards.CLOCK_MHZ[board]
-        hp = ("S_AXI_HP0", "S_AXI_HP1")
+        hp = {"m_axi_mf": ("smc_hp0", "S_AXI_HP0"), "m_axi_md": ("smc_hp0", "S_AXI_HP0"),
+              "m_axi_md1": ("smc_md1", "S_AXI_HP1")}
         assert "processing_system7_0/IRQ_F2P" in log
     assert re.search(rf"-offset {boards.CSR_BASE[board]:#010x} -range 4K nanoxl_0/s_axi_ctrl/\*", log, re.I), \
         "CSR window"
-    for intf, port in (("m_axi_mf", hp[0]), ("m_axi_md", hp[1])):
-        assert re.search(rf"connect_bd_intf_net \S*nanoxl_0/{intf}\S* \S*smc_{intf[-2:]}/S00_AXI", log)
-        assert re.search(rf"connect_bd_intf_net \S*smc_{intf[-2:]}/M00_AXI\S* \S*/{port}\b", log)
-        assert re.search(rf"assign_bd_address -target_address_space nanoxl_0/{intf} \S*{port}/\S*DDR", log)
+    for intf, (smc, port) in hp.items():   # ADR-005 §4 board mapping, through a SmartConnect each
+        assert re.search(rf"connect_bd_intf_net \S*nanoxl_0/{intf}\S* \S*{smc}/S0[01]_AXI", log), intf
+        assert re.search(rf"connect_bd_intf_net \S*{smc}/M00_AXI\S* \S*/{port}\b", log), intf
+        assert re.search(rf"assign_bd_address -target_address_space nanoxl_0/{intf} \S*{port}/\S*DDR", log), intf
     for pin in ("aclk", "aresetn", "irq"):
         assert f"nanoxl_0/{pin}" in log
     # every nanoxl_0 pin the script touches is a wrapper port / interface
     ports = {p["name"] for p in wrap_ports()}
-    intfs = {"s_axi_ctrl", "m_axi_mf", "m_axi_md"}
+    intfs = {"s_axi_ctrl", "m_axi_mf", "m_axi_md", "m_axi_md1"}
     for name in re.findall(r"nanoxl_0/(\w+)", log):
         assert name in ports or name in intfs, name
     # the flow reaches the bitstream and exports the overlay pair under one base name
@@ -187,7 +190,8 @@ def test_wrapper_ports_follow_vivado_axi_naming():
     for t in top:   # same port, renamed, same direction and width
         w = by[to_wrap(t["name"])]
         assert (w["dir"], w["width"]) == (t["dir"], t["width"]), t["name"]
-    want = {"s_axi_ctrl": (AXIL, "slave"), "m_axi_mf": (AXI_R, "master"), "m_axi_md": (AXI_R | AXI_W, "master")}
+    want = {"s_axi_ctrl": (AXIL, "slave"), "m_axi_mf": (AXI_R, "master"), "m_axi_md": (AXI_R | AXI_W, "master"),
+            "m_axi_md1": (AXI_R | AXI_W, "master")}
     seen = {k: set() for k in want}
     params = {}
     for p in wp:
@@ -196,7 +200,7 @@ def test_wrapper_ports_follow_vivado_axi_naming():
             kind = {"aclk": "clock", "aresetn": "reset", "irq": "interrupt"}[n]
             assert f'"xilinx.com:signal:{kind}:1.0 {n} ' in a, n
             continue
-        m = re.fullmatch(r"(s_axi_ctrl|m_axi_mf|m_axi_md)_([a-z]+)", n)
+        m = re.fullmatch(r"(s_axi_ctrl|m_axi_mf|m_axi_md|m_axi_md1)_([a-z]+)", n)
         assert m, f"{n}: not <interface>_<signal>"
         intf, sig = m.group(1), m.group(2).upper()
         assert f'X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 {intf} {sig}"' in a, n
@@ -210,10 +214,14 @@ def test_wrapper_ports_follow_vivado_axi_naming():
     for intf, (sigs, _) in want.items():
         assert seen[intf] == sigs, (intf, sigs ^ seen[intf])
     clk = next(p for p in wp if p["name"] == "aclk")["attrs"]
-    assert "ASSOCIATED_BUSIF s_axi_ctrl:m_axi_mf:m_axi_md" in clk and "ASSOCIATED_RESET aresetn" in clk
+    assert "ASSOCIATED_BUSIF s_axi_ctrl:m_axi_mf:m_axi_md:m_axi_md1," in clk and "ASSOCIATED_RESET aresetn" in clk
     assert "POLARITY ACTIVE_LOW" in next(p for p in wp if p["name"] == "aresetn")["attrs"]
     assert "PROTOCOL AXI4LITE" in params["s_axi_ctrl"] and "ADDR_WIDTH 12" in params["s_axi_ctrl"]
     assert "READ_ONLY" in params["m_axi_mf"] and "DATA_WIDTH 128" in params["m_axi_md"]
+    assert "READ_WRITE" in params["m_axi_md1"]
+    # the checked-in wrapper is the generator's output for today's nanoxl_top
+    from fpga.gen_wrap import render
+    assert WRAP.read_text() == render(), "rtl/nanoxl_axi_wrap.v is stale: run python3 fpga/gen_wrap.py"
     # Verilog-2001: no SystemVerilog keywords in the shell (module references need a Verilog top)
     body = re.sub(r"\(\*.*?\*\)", "", re.sub(r"//.*", "", WRAP.read_text()), flags=re.S)
     for kw in ("logic", "always_ff", "always_comb", "int ", "typedef", "interface "):
@@ -266,3 +274,24 @@ def test_resource_estimates_current(board):
     assert not res.get("failed"), res.get("failed")
     for k in ("LUT", "FF", "DSP", "BRAM36", "URAM"):
         assert k in res["utilization"]
+
+
+@pytest.mark.parametrize("board", sorted(BUILD))
+def test_estimate_mirrors_top_ports(board):
+    """fpga/yosys/estimate.py's buf_spad port widths (RPL / WPL) are nanoxl_top's localparams."""
+    from fpga.yosys.estimate import blocks
+    top = (ROOT / "rtl" / "nanoxl_top.sv").read_text()
+    p = boards.RTL_PARAMS[board]
+    N = p["N"]
+    val = {"1": 1, "VP": p["VP"], "CPL": N // 4 if N >= 4 else 1, "WPL": (N + 15) // 16, "APL": (N + 15) // 16}
+
+    def vec(name):
+        body = re.search(rf"localparam logic \[\w+\*8-1:0\] {name}\s*=\s*\{{([^}}]*)\}}", top).group(1)
+        toks = [re.sub(r"^8'(?:d(\d+)|\((\w+)\))$", lambda m: m.group(1) or m.group(2), t.strip())
+                for t in body.split(",")]
+        v = [val[t] for t in reversed(toks)]           # Verilog concat: last element is port 0
+        return f"{8 * len(v)}'h" + "".join(f"{x:02x}" for x in reversed(v)), len(v)
+
+    router = next(b for b in blocks(p) if b[0] == "spad_router")[2]
+    (rpl, nr), (wpl, nw) = vec("RPL"), vec("WPLV")
+    assert (router["RPL"], router["NR"], router["WPL"], router["NW"]) == (rpl, nr, wpl, nw)

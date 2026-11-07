@@ -108,8 +108,9 @@ def blocks(params: dict) -> list[tuple]:
     vp = params.get("VP", 1)
     pmax = max(apl, cpl, wpl, vp)
     nb = params["NB"] or (2 if pmax <= 1 else 4 if pmax <= 2 else 8 if pmax <= 4 else 16)
-    rpl = [1, apl, wpl, cpl, vp, vp, vp]       # read port p in byte p (rtl/nanoxl_top.sv RPL)
-    wplv = [1, cpl, vp]
+    # read ports: DMA0, array A, W, ACC, VEC A, B, P, DMA1; write: DMA0, array ACC, VEC D, DMA1
+    rpl = [1, apl, wpl, cpl, vp, vp, vp, 1]    # read port p in byte p (rtl/nanoxl_top.sv RPL)
+    wplv = [1, cpl, vp, 1]
 
     def hexv(v):
         return f"{8 * len(v)}'h" + "".join(f"{x:02x}" for x in reversed(v))
@@ -124,7 +125,7 @@ def blocks(params: dict) -> list[tuple]:
            ("arr_gs_fifo", "spad_fifo", dict(W=8 * N, DEPTH=N + 4), 1, ()),
            ("vec_seq", "vec_seq", dict(L=params["L"], AW=17, CTX_MAX=params["CTX_MAX"], D_MAX=params["D_MAX"],
                                        NG=params["NG"], NSLOT=params["NSLOT"], NCTX=params["NCTX"], PL=vp), 1, ()),
-           ("spad_router", "buf_spad", dict(LINES=params["ACC_LINES"], NB=nb, NR=7, NW=3, PMAX=pmax, RPL=hexv(rpl),
+           ("spad_router", "buf_spad", dict(LINES=params["ACC_LINES"], NB=nb, NR=len(rpl), NW=len(wplv), PMAX=pmax, RPL=hexv(rpl),
                                             WPL=hexv(wplv)), 5, ("spad_bank",))]
     depths = {}
     for b in ("ABUF", "WBUF", "ACC", "PBUF", "KV"):

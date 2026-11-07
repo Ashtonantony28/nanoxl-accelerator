@@ -1,9 +1,10 @@
 # Systolic array, tile controller and scratchpads (SG2 / M2)
 
 RTL: `rtl/pe.sv`, `rtl/skew.sv` (skew + `delay_pipe`), `rtl/systolic_array.sv`,
-`rtl/array_ctrl.sv`, `rtl/scratchpad.sv` (`scratchpad` + `spad_fifo`).
-Tests: `tests/rtl/test_pe.py`, `test_array.py`, `test_scratchpad.py` (cocotb modules
-`*_cocotb.py`). Port protocol: contract **C3** in `docs/contracts.md`.
+`rtl/array_ctrl.sv`, `rtl/scratchpad.sv` (`scratchpad` + `spad_fifo`); ARRAY engine
+sequencer (SG7a, §7): `rtl/array_seq.sv`, `rtl/array_seq_rd.sv`.
+Tests: `tests/rtl/test_pe.py`, `test_array.py`, `test_scratchpad.py`, `test_array_seq.py`
+(cocotb modules `*_cocotb.py`). Port protocol: contract **C3** in `docs/contracts.md`.
 Synthesis check: `fpga/synth_array.ys`.
 
 All blocks use `clk` and a synchronous active-low `rst_n`. Defaults: N = 8 in the RTL, 32
@@ -77,6 +78,16 @@ One command = one weight tile (K ≤ N rows, n ≤ N columns) applied to M activ
   `out_ready=1` (default 2N+8).
 - **K accumulation** across tiles: commands with the same `abase`/M, first with `acc=0`, the
   rest `acc=1`, the last with `emit=1`. ragged K and n need no padding upstream.
+- **Group scales** (`cmd_gs`, ADR-004, SG7a): the tile's weight stream starts with one scale
+  beat (byte c = uint8 `s[c]`) that goes into a group-scale FIFO (`spad_fifo`, `GM_DEPTH` =
+  N+4 rows) instead of a bank, so it can arrive while the bank is still busy. Rows carry a `gs`
+  bit in their tag; the RMW stage computes `(acc ? old : 0) + s[c]·psum[c]` with the FIFO head
+  and pops it on the tile's last row (rows leave the array in tile order). The multiply is
+  N unsigned-8 × signed-(log2 N + 12) bits (exact for INT4 tiles: |psum| ≤ N·2^10), in the
+  same stage as the add, so latency is unchanged (2N+4) and a `gs` tile costs max(m, k+1).
+  (If timing needs it, the product can be registered one stage earlier, ADR-004's "+1 stage".)
+  The scale beat waits while the FIFO is full; a `gs` row that finds no scale row sets
+  `overflow_seen` (sim). With `cmd_gs=0` the datapath is the SG2 one.
 
 ### Scratchpad (`scratchpad.sv`)
 `scratchpad`: single-clock 1R1W, `logic mem[DEPTH]`, synchronous write, registered read,
@@ -138,6 +149,7 @@ constructs: none; the `hazard_seen`/`overflow` checkers sit under `ifndef SYNTHE
 | `array_*` (N=4, 8) | random tiles with ragged K and input bubbles, exact latency 2N-1; -128×-128 over full K; INT4 with every code; overlap load; exact-limit reuse/chase; checker sanity ×2; reset mid-stream |
 | `ctrl_*` (N=4, 8, 16) | 40 random GEMMs (M up to 64, K up to 3N ⇒ multi-tile accumulation, ragged n, 30 % INT4, random accumulator base with wrap, garbage in masked lanes, random bubbles on cmd/w/a, 50 % random backpressure); INT4 with full/ragged/odd n; -128×-128 over K = 4N; long `out_ready=0` stall; M=1/K=1 accumulate chains (bypass); reset mid-stream; streaming performance |
 | `scratchpad_*` | random R/W at RD_LAT 1/2; FIFO random push/pop, count, throughput |
+| `ctrl_gs_*` (N=4, 8, 16) | `cmd_gs` tiles mixed with plain INT8/INT4 GEMMs (groups 8..64, ragged last group, random uint8 scales, bubbles, backpressure); extremes (a=-128, w=-8, s=255/0/1); M=1 K=1 gs tiles back to back (scale FIFO occupancy, bypass); streaming max(m, k+1) |
 | slow tier | `test_array_ctrl_kv260_size`: N=32, M_DEPTH=256, all controller tests with 60 random GEMMs (Verilator only; Icarus is impractically slow at 1024 PEs) |
 
 Every controller test ends by asserting `hazard_seen == 0`, `overflow_seen == 0`, `idle == 1`
@@ -148,9 +160,7 @@ and that every expected row arrived in order with the right `last` flag.
 - The accumulator holds M_DEPTH rows of N INT32; the compiler (SG4) allocates `abase`
   ranges and can double-buffer by alternating two ranges.
 - `cmd_ready` is combinational from `w_valid` (the last weight beat of the current load).
-- INT4 group scales are applied at requant (C1b), never in the array; for groups smaller
-  than the K extent of an accumulation chain the compiler must emit a partial result per
-  group (`emit=1` with a new `acc=0` chain), as anticipated in design-plan §6.1.
+- INT4 group scales: superseded by ADR-004 (`cmd_gs` in array_ctrl, and the sequencer in §7).
 
 ## 6. Future option: DSP48E2 2-MAC packing (AMD WP486)
 Two weights that share one activation can share one DSP48E2: compute
@@ -164,3 +174,122 @@ splits the packed product into the two psum columns. Nothing outside `systolic_a
 generate loop changes, because `pe_mul` is the only arithmetic in `pe.sv` and the
 port-level timing (LAT, write wavefront) can be preserved by an extra column delay. Kept as
 a behavioural multiply for now; enable once the Vivado DSP budget (ADR-003) needs it.
+
+## 7. ARRAY engine sequencer (`array_seq.sv`, SG7a / M5)
+
+Turns ISA `GEMM` / `GEMM_GS` words (docs/isa.md) into array_ctrl tile commands, streams the
+operands from the scratchpads and writes the INT32 results into the ACC buffer. It sits on
+ctrl_top's `arr_*` engine port (docs/control.md §2).
+
+```
+ cmd_word ─► decode (cmd_fields) ─► tile generator ─┬─► array_ctrl cmd FIFO ───────────────────────────► array_ctrl
+                                                    ├─► W tile FIFO ─► W row gen ─► array_seq_rd ─► [transposer] ─► w
+                                                    ├─► A tile FIFO ─► A row gen ─► array_seq_rd ───────────────► a
+                                                    ├─► ACC prefetch jobs ─► gate (earlier cmds done) ─► array_seq_rd (ACC)
+                                                    └─► write-back jobs ─► out row (+ old row) ─► ACC write port ─► done
+```
+
+**Loop order** per command: row chunks of `M_DEPTH` rows (the array_ctrl accumulator, `abase` 0),
+then output column tiles of N, then K-tiles of N rows (`GEMM_GS`: min(N, G) rows, so a tile
+never straddles a scale group; every `GEMM_GS` tile carries its group's scale beat). The
+K-chain of one column tile runs inside array_ctrl (`acc` = k-tile > 0, `emit` on the last), so
+the ACC buffer sees each output row once; with `accumulate=1` the write-back adds the old ACC
+row. Operand addressing follows the compiler (docs/isa.md §3), all incremental (no multiplier
+except the one-time `rup(K·N/2, 16)` of the `GEMM_GS` scale offset):
+
+| operand | segment of a tile | bytes |
+|---|---|---|
+| A row m | `a_addr + m·a_stride·16 + k0` | kt |
+| W INT8 row r | `w_addr + (k0+r)·N + n0` | nt |
+| W INT4 / GEMM_GS row r | `w_addr + (k0+r)·N/2 + n0/2` | nt/2 |
+| GEMM_GS scale row | `w_addr + rup(K·N/2,16) + (k0/G)·N + n0` | nt |
+| W `w_trans` (stored [N,K]) column c | `w_addr + (n0+c)·K + k0` | kt |
+| ACC row m | `c_addr + m·c_stride·16 + 4·n0` | 4·nt (strobes) |
+
+`w_buf=1` reads W from KVBUF (the attention GEMMs). `w_trans` tiles pass through a
+double-buffered N×N byte transposer (collect nt columns, emit kt K-rows; 2·N²·8 bits of
+registers, 16 kbit at N=32); other tiles bypass it once it is empty, so order is kept.
+`gemv` is a timing hint and is ignored (results are identical; the latency is already the
+2N+4 fill).
+
+**Scratchpad ports.** Four ports with the DMA's line protocol (docs/control.md §3: buffer id,
+17-bit line address, in-order responses with any latency, no response backpressure): A read
+(ABUF, `APL` lines per beat), W read (WBUF/KVBUF, `WPL` lines), ACC read and ACC write (one
+INT32 row = N/4 lines per beat, byte strobes). Defaults `APL = WPL = ceil(N/16)`. A beat is
+`PL` consecutive lines starting at any line address, so the integrator banks the physical
+buffers by line (ACC rows start on any line: `c_stride` is in lines). `array_seq_rd` turns
+byte-granular segments into beats: one beat when the segment fits the PL-line window from its
+start line, else two. Under the alignment rule A rows, ACC rows and weight rows of panels whose
+row length is a multiple of 16 always take one beat; ragged panels (the LM head, N=65) straddle
+and cost a second beat per row; `WPL = ceil(N/16)+1` would remove that. Each reader keeps at
+most `RCRED` = 8 beats requested and not consumed, with an RCRED-entry response FIFO, so
+responses never need backpressure; full throughput needs a memory latency below about RCRED-2.
+
+**Ordering, done.** Commands are accepted while the tile generator is idle and fewer than
+`OUTS` = 4 are outstanding (cmd_proc's MAXOUT). `done` pulses (registered, one per command, in
+order, ≥ 2 cycles after accept) when the command's last ACC write is accepted by the port; the
+integrator's ACC must make an accepted write visible to every read accepted at a later edge.
+The old rows of an `accumulate=1` command are read only after every earlier command is done,
+so a GEMM accumulating onto the previous GEMM's tile (K-split panels) is RAW-safe; within one
+command every ACC tile row is read once, before it is written. Opcodes other than GEMM/GEMM_GS
+(ATTN_TILE is reserved) set the sticky `err` (→ ctrl ERR 7) and still get their done. `clr`
+(ctrl_top `eng_clr`) resets the engine like `rst_n`, and the readers drop the responses of
+requests issued before it (counted in flight). `idle` = no command outstanding.
+
+### Measured throughput (`seq_perf_streaming`, `seq_compiler_perf`)
+
+Steady state, the same command twice back to back, no backpressure, memory latency 1:
+occupancy (done to done) equals Σ over tiles of max(mc, kt) (+1 per `GEMM_GS` tile) exactly
+for aligned operands, i.e. the engine adds no bubble between tiles, K-chains, column tiles, row
+chunks or commands (asserted at N=4 and N=8 for GEMV INT8/INT4, GEMM_GS G=8/64, prefill, M >
+M_DEPTH, w_trans from WBUF/KVBUF). Accept→done latency = occupancy + 2N+4 (array fill) + 8..23
+(readers, write-back, done register).
+
+Tiny model GEMM shapes at the KV260 size (N=32, Verilator, compiled for `array_n=32`), next to
+`nanoxl.cyclemodel.cost` (occupancy):
+
+| bundle | op | M | N | K | tiles | measured occ | accept→done | model occ |
+|---|---|---|---|---|---|---|---|---|
+| w8a8 | GEMM c_attn | 16 / 1 | 256 | 128 | 32 | 1024 | 1115 / 1100 | 528 |
+| w8a8 | GEMM attn_proj | 16 / 1 | 128 | 128 | 16 | 512 | 603 / 588 | 272 |
+| w8a8 | GEMM mlp proj | 16 / 1 | 64 | 512 | 32 | 1024 | 1115 / 1100 | 528 |
+| both | GEMM LM head (ragged 65-byte rows) | 16 / 1 | 65 | 128 | 12 | 624 | 715 / 700 | 208 |
+| both | GEMM scores (w_trans, KVBUF) | 16 / 1 | 16 / 17 | 32 | 1 | 32 | 139 / 125 | 32 |
+| both | GEMM P·V (KVBUF) | 16 / 1 | 32 | 16 / 17 | 1 | 16 / 17 | 107 / 93 | 32 |
+| w4a8 | GEMM_GS c_attn | 16 / 1 | 384 | 128 | 48 | 1584 | 1675 / 1660 | 776 / 416 |
+| w4a8 | GEMM_GS fc | 16 / 1 | 480 | 128 | 60 | 1980 | 2071 / 2056 | 968 / 518 |
+| w4a8 | GEMM_GS attn_proj | 16 / 1 | 128 | 128 | 16 | 528 | 619 / 604 | 264 / 144 |
+| w4a8 | GEMM_GS mlp proj panels | 16 / 1 | 96, 32 | 512 | 48, 16 | 1584, 528 | 1675, 619 / 1660, 604 | 776, 264 / 416, 144 |
+
+The tiny model has M ≤ 16 < N = 32, so every tile is weight-load bound (kt = 32 rows): the RTL
+loads **one weight row per cycle** (array_ctrl, C3), while the cycle model assumes
+`wload_rows_per_cycle = 2` (ADR-003) and, for INT4, two rows per beat, so it predicts 2x (INT8)
+to 3.8x (W4A8 decode) fewer cycles than measured. Array-bound tiles (M ≥ kt, e.g. P·V with
+M = 16 = K) are where the RTL beats the model's fixed cost. Either the cycle model uses
+`wload_rows_per_cycle = 1` without the INT4 doubling (what the RTL does today), or array_ctrl
+gets a 2-row weight port (two bank rows per cycle, a 2N-byte W port, plus a WBUF read port of
+that width). The LM head pays 624 instead of 384 cycles for its 65-byte rows (a second beat
+per straddling row).
+
+### Verification (`tests/rtl/test_array_seq.py`, cocotb `array_seq_cocotb.py`)
+
+Reference: `nanoxl.funcsim` on the same buffer images (all bytes random); every buffer is
+compared byte for byte after the run. Commands are `isa.encode(..., aligned=True)` words.
+
+| test | what |
+|---|---|
+| `seq_random` (N=4, 8; 40 cmds at N=32) | 30 random GEMM (INT8, INT4, w_trans, KVBUF) / GEMM_GS (G = 8..64) back to back: M up to 2·M_DEPTH+3, ragged N and K, random strides and bases, 35 % K-chains accumulating into the previous command's tile; random ready on all four ports, response latency 1..6, cmd bubbles |
+| `seq_random_nobp` | same generator, no backpressure, latency 1 |
+| `seq_gs_groups` | GEMM_GS with G = 8, 16, 32, 64, 128, K over several groups plus a ragged last group, a=-128, w=-8, gm=255, accumulate on top |
+| `seq_illegal_opcode` | ATTN_TILE between two GEMMs: `err`, three dones in order, GEMMs exact |
+| `seq_reset_mid_command` | `rst_n` and twice `clr` with rows in the array and responses in flight (the memory keeps answering after `clr`); no stale done; fresh commands exact |
+| `seq_compiler` (N=8) | the cheap compiler GEMM shapes of tiny W8A8 + W4A8 (attention w_trans/KVBUF, P·V, LM head N=65, smallest GEMM_GS), operands = funcsim state right before the command |
+| `seq_perf_streaming` (N=4, 8) | asserts occupancy = ideal for 9 shapes (above), logs the ragged-row cost |
+| slow: `test_array_seq_compiler_all` | N=16, all 236 GEMM / GEMM_GS commands the compiler emits for both bundles (prefill of the reference prompt + one decode step) |
+| slow: `test_array_seq_kv260_size` | N=32: `seq_random` (40) and `seq_compiler_perf` (every distinct shape exact + the table above) |
+
+The scratchpad model also flags a read and a write of the same ACC line at the same edge (never
+seen). Mutation checks (each killed): scale multiply bypassed in the RMW (`ctrl_gs_*`,
+`seq_random`, `seq_gs_groups`); scale FIFO popped on every row instead of every tile
+(`ctrl_gs_*`); K-chain `acc` bit forced to 0 (every seq test); ACC prefetch not gated on the
+earlier commands' done (`seq_random`, `seq_random_nobp`, `seq_reset_mid_command`).

@@ -137,7 +137,7 @@ not needed for throughput and is left out.
 | `array_ctrl` N=8, M_DEPTH=64 | word | 67 `$macc`, 5 `$mem_v2`: accumulator `u_acc.mem` 64×256 b and FIFO `u_ofifo.u_mem.mem` 24×257 b (BRAM candidates) plus three 2-entry descriptor arrays (become FFs), 435 FF cells |
 
 The gate count is dominated by the 64 multipliers built from generic gates; on the KV260
-each `$macc` maps to one DSP48E2 (or half of one with packing, §6). Synthesis-only
+each `$macc` maps to one DSP48E2 (half of one with packing, §6). Synthesis-only
 constructs: none; the `hazard_seen`/`overflow` checkers sit under `ifndef SYNTHESIS`.
 
 ## 4. Verification summary
@@ -162,18 +162,43 @@ and that every expected row arrived in order with the right `last` flag.
 - `cmd_ready` is combinational from `w_valid` (the last weight beat of the current load).
 - INT4 group scales: superseded by ADR-004 (`cmd_gs` in array_ctrl, and the sequencer in §7).
 
-## 6. Future option: DSP48E2 2-MAC packing (AMD WP486)
-Two weights that share one activation can share one DSP48E2: compute
-`a × (w0·2^18 + w1)` in the 27×18 multiplier and recover `a·w0` and `a·w1` from the two
-fields of the product (with the sign-correction term from WP486). In this array the two
-PEs (r, 2j) and (r, 2j+1) see the same activation one cycle apart. The change is local:
-a `pe2` cell replaces two horizontally adjacent PEs, registers the activation once per
-pair (activations then advance two columns per register, so the input skew per row is
-unchanged and the deskew triangle halves in width), holds two bank pairs of weights, and
-splits the packed product into the two psum columns. Nothing outside `systolic_array.sv`'s
-generate loop changes, because `pe_mul` is the only arithmetic in `pe.sv` and the
-port-level timing (LAT, write wavefront) can be preserved by an extra column delay. Kept as
-a behavioural multiply for now; enable once the Vivado DSP budget (ADR-003) needs it.
+## 6. DSP48E2 2-MAC packing (AMD WP486, SG11c, `PACK = 1`, the default)
+
+`systolic_array #(.PACK(1))` builds the grid from `pe_pair` cells (`rtl/pe.sv`): PE(r, 2p) and
+PE(r, 2p+1) share one DSP48E2. Both weights multiply the same activation in the same cycle
+T + r + 2p:
+
+    P  = (wA·2^18 + wB) · a          27×18 multiply (pre-adder), 36-bit product
+    lo = P[17:0] as signed 18 bits    = a·wB   (|a·wB| ≤ 2^14 < 2^17)
+    hi = P[35:18] + P[17]             = a·wA   (the WP486 correction: lo's sign bit borrows from hi)
+
+Column 2p adds `hi` to its psum at the end of cycle T + r + 2p, exactly as an unpacked PE.
+Column 2p+1's psum input arrives one cycle later, so `lo` is registered and added at the end of
+T + r + 2p + 1, again exactly as an unpacked PE. The activation register is passed on after 2
+cycles (one register pair per pair of columns), so the row wavefront and LAT = 2N−1 are
+unchanged. The weight write skew delays column 2p+1 by 2p instead of 2p+1: both weights of a
+pair are written in the cycle the pair multiplies, which keeps the bank reuse and use rules
+(§1) exactly as for the unpacked array. The simulation hazard checker sees the column-2p+1
+entry of the activation bus mirror the pair input (what that PE multiplies) and takes its
+generation bit from column 2p. Results are bit-identical to `PACK = 0`.
+
+Verification: `test_pe_pair_packing` checks `pe_pair` against plain products for **all 2^24
+int8 a × wA × wB** (Verilator, ~30 s; every 13th case on Icarus), with full-range 32-bit psums,
+alternating weight banks, one case per cycle; dropping the `+P[17]` correction makes 8.3 M of
+the 16.8 M cases fail. `test_array_core` runs the full array bench at N = 4 and 8 for PACK = 0
+and 1; `array_ctrl` / `array_seq` / `nanoxl_top` use the default (PACK = 1).
+
+Resources (Yosys 0.33 `synth_xilinx`, `systolic_array` alone):
+
+| | N = 16 PACK 0 | N = 16 PACK 1 | N = 32 PACK 0 | N = 32 PACK 1 |
+|---|---|---|---|---|
+| KV260 (xcup) LUT / FF / DSP | 11,260 / 21,870 / 256 | 12,028 / 24,054 / **128** | see docs/fpga.md §2.3 | |
+| PYNQ-Z2 (xc7) LUT / FF / DSP | 3,068 / 13,678 / 256 | 12,028 / 24,054 / 256 | | |
+
+On the 7 series the DSP48E1 multiplier is 25×18, too narrow for the 27-bit packed operand,
+so packing saves nothing there and costs the psum adders the DSP48E1 otherwise absorbs:
+**build the PYNQ-Z2 with PACK = 0** (the parameter is not yet plumbed through
+`array_ctrl` / `array_seq` / `nanoxl_top`; see ADR-006).
 
 ## 7. ARRAY engine sequencer (`array_seq.sv`, SG7a / M5)
 

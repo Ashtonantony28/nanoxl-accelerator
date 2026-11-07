@@ -46,11 +46,15 @@ SRDHM is implemented for the whole int32 domain, including `INT32_MIN × INT32_M
 | S1 | 32-bit wrapping `acc + bias` |
 | S2 | 64-bit signed product `x · mult` (DSP) |
 | S3 | product register (DSP P register; the 32×32 product cascades over 4 DSP48E2) |
-| S4 | add the nudge (`2^30`, or `1 − 2^30` when the product is negative); C truncating `/2^31`, computed as add `2^31−1` when negative, then `>>> 31`; overflow select |
+| S4 | `((p >>> 30) + 1) >>> 1` (one 34-bit increment, see below); overflow select |
 | S5 | `RDivPOT(q, shift)` (32-bit barrel shifter) |
 | S6 | clamp to int8 or int16; saturation flag |
 
 A beat accepted at edge `k` appears on `out_*` after edge `k+5`, i.e. 6 cycles later. The test `pipeline_depth` checks this.
+
+**S4 identity (SG11c).** For a product `p < 0`, `p + nudge = p + 1 − 2^30` is negative, and C truncation of a negative `x` by `2^31` equals `floor((x + 2^31 − 1) / 2^31) = floor((p + 2^30) / 2^31)`; for `p ≥ 0` it is `floor((p + 2^30) / 2^31)` directly. So `trunc(p + nudge, 2^31) = (p + 2^30) >>> 31 = ((p >>> 30) + 1) >>> 1` for every `p`, and S4 is one 34-bit increment instead of two 64-bit adds and a sign-dependent bias (Yosys: `srdhm` 209 → 118 LUT on the KV260). The clamp in S6 tests the bits above the format's sign bit for equality instead of two 32-bit compares.
+
+**DSP decomposition option (`requant #(.NDSP(3))`, default 4).** The 32×32 product needs four 27×18 tiles: each tile is at most 27 bits on one side, so a tile can hold at most one corner of the 32×32 square. `NDSP = 3` covers three corners with DSPs (`a = aH·2^26 + aL`, `b = bH·2^17 + bL`: `aL·bL`, `aL·bH`, `aH·bL`) and builds the 6×15 corner `aH·bH` from shifted partial products in fabric. Under Yosys it costs ~175 LUT per DSP saved on the KV260 (requant L = 16: 5.8 k LUT / 64 DSP → 8.6 k / 48) and on the 7 series it saves nothing (the 26-bit operand does not fit DSP48E1's 25 bits). It is tested (`test_requant[*-3]`, `test_srdhm[3]`) but not used: on both boards LUTs, not DSPs, are the limit (ADR-006).
 
 **Saturation counting.** `out_sat[i] = saturated(i) & out_keep[i]`. The `sat_counter` adds `popcount(out_sat)` on every output transfer. It is 32 bits wide, saturates instead of wrapping, and has a sticky flag; `sat_clr` clears both. A clear in the same cycle as events keeps those events.
 
@@ -63,7 +67,7 @@ Each op computes an **exact** signed 64-bit intermediate `w` from the int32 lane
 | 0 | PASS | `a` (with `fmt` saturation, this is the *saturate/narrow* op) | a |
 | 1 | ADD | `a + b` (33-bit exact) | a, b |
 | 2 | SUB | `a − b` (33-bit exact) | a, b |
-| 3 | MUL | `RDivPOT(a · b, shamt)` (64-bit product, rounded right shift) | a, b |
+| 3 | MUL | `RDivPOT(a · b, shamt)` (64-bit product, rounded right shift); **1 beat per 7 + shamt cycles** (below) | a, b |
 | 4 | MAX | `max(a, b)` | a, b |
 | 5 | MIN | `min(a, b)` | a, b |
 | 6 | SRA | `a >> shamt` (arithmetic, floor) | a |
@@ -74,13 +78,17 @@ Each op computes an **exact** signed 64-bit intermediate `w` from the int32 lane
 
 `shamt` is 0..31, and `lo` and `hi` are int32. All of them, together with `op` and `fmt`, are **per-beat** inputs that travel down the pipeline with the data. Beats from different commands can therefore occupy the pipeline back to back.
 
-**Pipeline: 3 stages.**
+**Pipeline: 3 stages, 1 beat per cycle for every op except MUL.**
 
 | Stage | Work |
 |---|---|
-| S1 | add, subtract, 32×32 multiply or compare |
-| S2 | shift, rounding or clamp |
+| S1 | add, subtract or compare (one 33-bit adder: `a + b` for ADD, `a − b` otherwise; MAX / MIN select on its sign) |
+| S2 | 32-bit shift, rounding or clamp; SHL as `(a << shamt) mod 2^35` plus an overflow test |
 | S3 | `fmt` saturation and saturation flag |
+
+The datapath carries `w` clamped to 35 bits, which saturates to every `fmt` exactly like `w` (SG11c; previously 64 bits throughout).
+
+**MUL rate (SG11c, docs/fpga.md C4).** The compiler emits no VEC MUL (and `vec_seq` forwards MUL only with `shamt = 0`), so the product is no longer a combinational 64×64 multiply per lane before S1. Each lane has one 17×17 signed multiplier (one DSP) with registered operands and product: `a·b = aL·bL + (aL·bH + aH·bL)·2^16 + aH·bH·2^32` (aH, bH signed high halves, aL, bL unsigned low halves) over 4 cycles, accumulated one cycle behind, then shifted right one bit per cycle (`shamt` cycles) keeping the round and sticky bits, clamped to 34 bits, rounded (half away from zero) and entered into S1 as a finished value. `in_ready` is low while a MUL beat is in the multiplier. A MUL beat accepted at edge `k` lets the next beat (of any op) in at edge `k + 7 + shamt`, and appears on `out_*` 9 + `shamt` cycles after acceptance (7 / 9 for `shamt = 0`). Results are bit-identical; `mul_depth_and_rate` checks both numbers and `random_ops_backpressure` asserts the exact full-rate cycle count with MUL beats mixed in. Cost on the KV260 at L = 16 (Yosys): 64 → 16 DSP for the whole ALU (see docs/fpga.md §2.3 for LUTs).
 
 The ALU has its own saturation counter, which counts kept lanes on transfers.
 
@@ -101,15 +109,15 @@ Widening rules, summarised: inputs widen to 64 bits, the op is computed exactly,
 
 LayerNorm uses `sum` and `sumsq` from the same pass. Softmax uses `max`. Squaring only int16 values keeps the unit at one 16×16 multiplier (one DSP) per lane. The design plan keeps the residual stream in int16, and any wider input raises `sq_err`.
 
-**Pipeline: 3 stages.**
+**Pipeline: 2 + NTS stages.**
 
 | Stage | Work |
 |---|---|
 | S1 | keep mask, 16×16 squares, int16 range check |
-| S2 | balanced adder and compare trees across L lanes (heap layout, L padded to a power of two) |
+| S2 | balanced adder and compare trees across L lanes (heap layout, L padded to a power of two), cut into NTS = max(1, ⌈log2(L) / 2⌉) register stages of 2 levels each (SG11c, docs/fpga.md C7): 1 for L ≤ 4, 2 for L = 8 / 16, 3 for L = 32 / 64 |
 | S3 | row accumulator and result register |
 
-The result is valid 3 cycles after the beat carrying `last`. A pending result that has not been taken stalls the input.
+The result is valid 2 + NTS cycles after the beat carrying `last` (3 for L ≤ 4, 4 at L = 16, 5 at L = 64; test `result_latency`). REDUCE is not part of the ISA and `vec_seq` leaves the R port unconnected, so the change affects no compiled program and no cycle-model number. A pending result that has not been taken stalls the input.
 
 ## 5. Sequencer (`vec_unit`)
 
@@ -164,7 +172,7 @@ The input side runs one command at a time. The command-accept cycle costs one id
 
 The output side keeps a queue of up to `RECQ = 4` elementwise commands still in flight. A row can start before the previous row has drained, and D beats always leave in command order. Each unit is in order, and the output mux only takes beats from the unit at the head of the queue. Because the ALU pipeline (3 stages) is shorter than requant (6 stages), an ALU command that directly follows a REQUANT command waits up to 3 cycles for the requant beats ahead of it. The `back_to_back_throughput` test asserts the cost model exactly:
 
-`cycles ≤ beats + commands + 3 × (REQUANT→ALU transitions) + fill`
+`cycles ≤ beats + commands + 3 × (REQUANT→ALU transitions) + Σ_MUL beats (6 + shamt) + fill`
 
 If that bubble matters for the schedule, the fix is to give the ALU path 3 more stages to match requant.
 
@@ -210,9 +218,9 @@ The verify command is `SIM=icarus python3 -m pytest -q tests/rtl -k "requant or 
 | Test | What it checks |
 |---|---|
 | `test_vec_ref.py` (no simulator) | The RTL's exact arithmetic (64-bit product, nudge, truncation by bias-then-shift, 32-bit RDivPOT) against `numerics.requant`: 2M random samples, the full 9×9×4×32×2 extremes cross product, and a bit-level Python-int transcription. `vec_ref.alu` against a pure big-int model for all 16 opcodes. The reduce width bound. |
-| `test_requant.py` (L = 1, 4, 16) | 20k random lane-results per L, under three handshake regimes: full rate (asserts 1 beat per cycle), heavy backpressure and sparse input. Directed corners: INT32_MIN and MAX, mult = 2^30 and 2^31−1, shift = 0, 1, 30 and 31, bias wraparound both ways, exact halves in SRDHM (mult = 2^30, odd x) and in RDivPOT (both signs, every e), out-of-contract mults including INT32_MIN². Random keep and last. Exact saturation-counter value, sticky flag, `sat_clr`, pipeline depth = 6. |
-| `test_vec_alu.py` (L = 1, 4, 16) | Every op × fmt × shamt on 15 extreme values (all pairs). Rounding halves for MUL and SRAR. 20k random lane-results per op at L = 16 with ops shuffled back to back. Saturation counter, depth = 3. |
-| `test_vec_reduce.py` (L = 1, 3, 4, 16) | Random rows of 1..400 elements, including ragged final beats and randomly masked interior lanes with junk under the mask. Width-limit rows. Single-beat rows back to back. Three backpressure regimes. |
+| `test_requant.py` (L = 1, 4, 16; L = 4, 16 also with `NDSP = 3`) + `test_srdhm` (`srdhm` alone, NDSP 4 and 3: all pairs of 27 extremes incl. the tile boundaries, 60 k random, random `en`) | 20k random lane-results per L, under three handshake regimes: full rate (asserts 1 beat per cycle), heavy backpressure and sparse input. Directed corners: INT32_MIN and MAX, mult = 2^30 and 2^31−1, shift = 0, 1, 30 and 31, bias wraparound both ways, exact halves in SRDHM (mult = 2^30, odd x) and in RDivPOT (both signs, every e), out-of-contract mults including INT32_MIN². Random keep and last. Exact saturation-counter value, sticky flag, `sat_clr`, pipeline depth = 6. |
+| `test_vec_alu.py` (L = 1, 4, 16) | Every op × fmt × shamt on 15 extreme values (all pairs). Rounding halves for MUL and SRAR. 20k random lane-results per op at L = 16 with ops shuffled back to back. Saturation counter, depth = 3; MUL depth 9 + shamt and rate 7 + shamt cycles per beat. |
+| `test_vec_reduce.py` (L = 1, 3, 4, 8, 16; result latency 2 + NTS) | Random rows of 1..400 elements, including ragged final beats and randomly masked interior lanes with junk under the mask. Width-limit rows. Single-beat rows back to back. Three backpressure regimes. |
 | `test_vec_unit.py` (L = 1, 4, 16 with an SFU stub; L = 4 without) | 200–400 random commands covering every unit, reserved opcodes, `b_imm` and `p_imm`, `len` = 0, 1..5L+3 and 384, with random valid and ready on all six streams and the SFU. Every D and R beat, both saturation counters, `illegal_op` and `busy` are checked. Back-to-back throughput bound. |
 | `test_vec_sat_counter.py` | W = 6 so that saturation, clear and the sticky flag are all exercised. |
 
@@ -233,13 +241,12 @@ Cell counts are generic gates after `synth -flatten`. Yosys generic synthesis ma
 | `vec_reduce` | 10,758 | 844 |
 | `vec_unit` (all of the above + sequencer) | 94,532 | 3,058 |
 
-In both `requant` and `vec_alu`, most of the cells are the four 32×32 multipliers. In `vec_alu` the 64-bit rounding barrel shifter adds to that. Vivado maps the multipliers to DSP48E2 slices (see §8).
+In both `requant` and `vec_alu`, most of the cells are the multipliers (these counts predate SG11c; the 32×32 ALU multiplier is now a multi-cycle 17×17 one). FPGA numbers are in docs/fpga.md §2.3.
 
 ## 8. Integration notes and known limits
 
-- **DSP budget (decide in ADR-003).** At L = 64, requant needs one 32×32 multiplier per lane, which is about 4 DSP48E2s, so about 256 DSPs. The ALU MUL is also 32×32 per lane, another 256. The reduce squares are 16×16, one DSP each, so 64. That totals about 576 of the KV260's 1,248 DSPs before the array.
-  - Options: restrict ALU MUL to 16×16 operands, which the design plan's int16 residual and LayerNorm scale probably allow, or share the multiplier between requant and the ALU, since the two never run in the same cycle for the same command.
-- **Reduce tree timing.** The tree adds L lanes in a single cycle: at L = 64 that is 6 levels of 48-bit adders. At 250 MHz it may need one more pipeline register. The tree is written as a heap, so a register can be inserted at any level.
+- **DSP budget (SG11c).** Per lane: requant 4 DSP48E2 (32×32), ALU MUL 1 (multi-cycle 17×17), reduce square 1 (16×16): 6 per lane, 96 at L = 16, 384 at L = 64 (was 9 per lane).
+- **Reduce tree timing.** Pipelined every 2 levels (§4).
 - **Combinational `in_ready` path.** `in_ready` depends combinationally on `out_ready` (§1).
 
 ## 9. VEC engine (`vec_seq`, SG7b)

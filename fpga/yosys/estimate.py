@@ -45,6 +45,13 @@ CLASSES = {
     "URAM": re.compile(r"^URAM288$"),
 }
 BLOCK_MODULES = ("ctrl_top", "array_seq", "vec_seq", "buf_spad")
+# Pre-synthesis steps. Memories with many read ports -- array_seq's K-transposer `trc` (64 x 256 b, 32 read
+# ports at N=32), vec_seq's per-lane tables (t_cols, t_end, rec_bias, ... with L+1 read ports) -- send
+# memory_libmap past 13 GB and are killed. They can only be flip-flops anyway (Vivado does the same: no RAM
+# primitive has more than 2 read ports, LUTRAM up to 7), so every memory with more than 4 read ports is
+# mapped to registers before synth_xilinx.
+PRE_ALL = ["proc", "opt_clean", "memory -nomap", "memory_map t:$mem_v2 r:RD_PORTS>4 %i"]
+PRE = {"array_seq": PRE_ALL, "vec_seq": PRE_ALL}
 
 
 def rtl_files():
@@ -138,6 +145,7 @@ def _synth_job(job):
              f"rename -top {module}"]
     if bbox:
         lines.append("blackbox " + " ".join(f"*{m}*" for m in bbox))
+    lines += PRE.get(module, [])
     lines += [f"synth_xilinx {' '.join(family)} -noiopad -top {module}", f"tee -q -o {stat} stat -top {module}"]
     script = "\n".join(lines) + "\n"
     ys, meta = work / f"{name}.ys", work / f"{name}.time"

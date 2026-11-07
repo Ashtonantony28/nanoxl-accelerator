@@ -1,6 +1,8 @@
 # ADR-002: Quantization scheme, integer nonlinear ops (C5), model bundle
 
 Status: accepted (SG1 / M0, 2026-11-06). Freezes contract C5 in `docs/contracts.md`.
+Headline (docs/quant-study.md): W8A8 ΔPPL +0.96 % (tiny) / +0.81 % (shakespeare); W4A8 +3.29 % / +0.74 %. Both G2 targets (+3 % / +8 %) are met.
+INT8 residual: +17.5 % / +890 %. SmoothQuant α=0.5: within ±0.1 % (off).
 Evidence: `docs/quant-study.md` (numbers), `nanoxl/golden.py` + `nanoxl/quant/ops.py` (executable spec),
 `tests/py/test_golden_*.py` (bounds, determinism, KV-cache equivalence).
 
@@ -26,7 +28,7 @@ gets an exact left pre-shift `ls` of the int32 accumulator (`score.ls`, 0 for bo
 ## Why
 - INT16 residual is free in area (adds only) and removes residual saturation; INT8 residual costs measurable PPL (study).
 - LUT GELU is exact on its INT8 domain (max 0.5 LSB, gain 1.000) and costs 256 B per layer; the poly is worse and needs an int16 c_fc output.
-- exp2 LUT + shift is ≤1.5 Q.15 LSB on all 65,536 inputs and needs no multiplier; the poly is two multipliers and ~100× worse.
+- exp2 LUT + shift is ≤1.5 Q.15 LSB on all 65,536 inputs and needs no multiplier; the shift+poly is two multipliers and has a 64× larger max error (64 vs 1 Q.15 LSB). PPL is the same within noise.
 - P = int8 [0,127] keeps the P@V GEMM inside C1 (signed INT8 array); scale 1/127 (not 1/128) makes p=1.0 exact, so there is no gain bias for peaked rows.
 - Static per-tensor scales keep the vector unit free of a max-reduction before each GEMM (dynamic per-token is an M8 option).
 

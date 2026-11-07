@@ -96,3 +96,83 @@ latency per DMA; LN/softmax cost is a guess until SG5 (2-3 passes plus a fixed p
 command fetch is charged as issue cycles, not DDR bandwidth (~16 B per command, under 1 % of
 traffic); no clock-domain or refresh effects. Achievable PL DDR bandwidth (8 GB/s on KV260 needs
 two 128-bit HP ports at 250 MHz) is the largest unknown and is measured first in M7.
+
+## Update (SG4c, wave 3): cycle model on measured RTL costs
+
+Status: the board numbers above came from the M1 estimates. They are **superseded** by the numbers in
+this section. `nanoxl/cyclemodel.py` now charges the costs the RTL docs measured. Command fetch is
+over AXI (8-word bursts, one in flight, 16-word FIFO), dispatch is one word per cycle into 8-deep
+queues, and a SIGNAL at a queue head blocks that queue until the earlier commands complete
+(docs/control.md). The DMA engine moves one 128-bit beat per cycle on a single master. It does not
+pipeline commands against each other, it allows at most 4 bursts in flight (each at most 256
+beats and within one row), and it adds a 1-cycle realigner bubble per row. C3 tiles cost max(M, k)
+with a first output after 2N + 4 cycles, and INT4 still moves one K-row per beat (docs/array.md).
+LN and softmax cost 3·nb + 19 per row plus 1 accept cycle, with no overlap between rows. An LN
+block costs 2 + cols/8 + cols/4 cycles to load when it is not resident, and LUT_LOAD costs 32
+cycles (docs/sfu.md). On the PYNQ-Z2 the 64-bit HP port caps the DMA at 8 B/cycle. The DDR
+bandwidth and latency per board are unchanged assumptions (8 GB/s / 300 ns, 1.5 GB/s / 400 ns).
+`python3 bench/roofline.py` regenerates `bench/results/{boards,fixes,breakdown}.md`.
+
+**Compiler fix applied in this update.** The compiler emitted every int8 weight panel as `kc` rows
+of `nt` bytes (384 × 64 B for shakespeare), even though both sides are contiguous. Each 64-byte
+row becomes its own burst, and with 4 bursts in flight that is about 4 rows per DDR latency. The
+compiler now coalesces every DMA whose source and destination are contiguous into single-row
+commands of up to 64 KiB (`Compiler._dma`). The GEMM commands and the buffer layouts are
+unchanged. The funcsim-vs-golden suite, including the slow shakespeare cases, is still
+bit-exact. `test_compiler_decode_utilization_measured` guards against a regression.
+
+| board | model | W | decode tok/s: M1 estimate → measured, old compiler → **measured, coalesced** | prefill ms (T = 256): estimate → old → **now** | weight bound |
+|---|---|---|---|---|---|
+| KV260 | shakespeare | 8 | 712 → 55 → **333** | 12.4 → 38.0 → **13.9** | 752 |
+| KV260 | shakespeare | 4 | 1,320 → 579 → **597** | 12.7 → 14.2 → **14.2** | 1,500 |
+| KV260 | tiny | 8 | 8,765 → – → **3,780** | 0.67 → – → **0.91** (T = 128) | 10,066 |
+| PYNQ-Z2 | shakespeare | 8 | 128 → 21 → **99** | 82.7 → 395 → **86.5** | 141 |
+| PYNQ-Z2 | shakespeare | 4 | 229 → – → **176** | 82.3 → – → **84.5** | 281 |
+
+Batch-1 G3 now holds for prefill: the array is 83 % busy on the KV260 and 87 % on the PYNQ-Z2.
+It does not hold for KV260 decode, which uses 46 % of the assumed 8 GB/s because the single
+128-bit DMA master tops out at 4 GB/s. The PYNQ-Z2 reaches 70 % of its weight bound and 88 %
+of what its 64-bit port can deliver.
+
+### Where the time goes (KV260, shakespeare W8, `bench/results/breakdown.md`)
+
+Two numbers per op class: its share of the critical path, then the engine busy time as a share
+of the total.
+
+* **Decode** (751k cycles per token): DMA weights 93.0 % / 93.0 %, DMA params (requant records,
+  LN blocks) 3.5 % / 3.6 %, attention GEMMs (K and V read through the weight port) 2.5 %, linear
+  GEMMs 0.8 % on the path while the array is 44 % busy. Fetch, dispatch, LN, softmax and requant
+  are each under 0.5 %. Decode is a pure DMA stream.
+* **Prefill** (3,469k cycles, two 128-row chunks): linear GEMMs 78.5 % (the array is 77 % busy),
+  softmax 7.7 %, attention GEMMs 6.4 %, LN 3.8 %, GELU and KV_APPEND 1.1 % each. Weight DMA is
+  40 % busy and fully hidden behind the GEMMs.
+* **W4 decode** (419k cycles): DMA weights 85 % on the path, and the array is 81 % busy. INT4
+  halves the DMA bytes, but the array still takes one K-row per cycle, so the 1-row weight port
+  and the DMA are now about equal limits.
+
+### Top 3 bottlenecks and modelled gains (`bench/results/fixes.md`)
+
+1. **One 128-bit DMA master = 4 GB/s at 250 MHz** (half the assumed 8 GB/s). Fix: a second DMA
+   master on a second HP port, striping or splitting by the `chan` hint, which the ISA already
+   carries; the scratchpad line port must widen to match. KV260 W8 decode 333 → **614 tok/s
+   (1.84x)**. W4 gains only 1.09x (597 → 649) until fix 3. PYNQ-Z2 W8 99 → 122 (1.24x).
+2. **The DMA runs one command at a time, and SIGNAL blocks its queue until the command
+   completes.** Every 24 KiB panel pays a full 75-cycle DDR round trip. Fix: overlap the next
+   command's AR with the current data phase, and carry the SIGNAL on the command's `done`
+   instead of the queue head. KV260 W8 decode **+5 %** (350), prefill +2 %, PYNQ-Z2 +4 %. The
+   gain is small and costs control-plane complexity, so it is second priority.
+3. **Array weight port: 1 K-row per cycle, also for INT4** (C3). This binds W4A8 decode once the
+   DMA is doubled. Fix: the 2-row port that ADR-003 proposed above (two WBUF banks, two rows per
+   cycle; for INT4, two nibble rows per beat). KV260 W4 decode with fixes 1-2: 674 → **1,238
+   tok/s (1.84x)**, and W8 gains another 3 %. With all fixes, KV260 W8 decode reaches 696 tok/s
+   (93 % of the 8 GB/s weight bound).
+
+Not worth doing now: the **SFU second row buffer** (ping-pong) leaves decode unchanged and gives
+prefill 1.4 % (13.88 → 13.69 ms), although softmax is 7.7 % of the prefill critical path. Resident
+SFU parameter slots and an on-chip command ring each give under 1 %. Command fetch over AXI hides
+behind the DMA queue (critical-path share < 0.1 %).
+
+**Decision impact.** The array size, lanes and buffer sizes in the table at the top stay as they
+are. The weight-port row in that table ("2 rows/cycle" for the KV260) is not what was built: the RTL
+has 1 row per cycle. It becomes fix 3, behind the second DMA master (fix 1), which matters most
+for M7. The 8 GB/s KV260 assumption now requires two DMA masters on two HP ports.

@@ -405,11 +405,20 @@ class RaceError(AssertionError):
     pass
 
 
-def check_hazards(cmds, ddr_base=0):
+SEM_MAX = 255       # RTL semaphore counter saturates (a SIGNAL at 255 stalls, docs/control.md §1)
+QUEUE_DEPTH = 8     # RTL per-queue command FIFO (QDEPTH)
+SEM_STREAM_LIMIT = SEM_MAX + QUEUE_DEPTH
+
+
+def check_hazards(cmds, ddr_base=0, sem_limit=SEM_STREAM_LIMIT):
     """Prove that every pair of conflicting accesses (RAW/WAR/WAW on any 16-byte block of any buffer
     or DDR) in ``cmds`` is ordered by happens-before: same-queue program order plus SIGNAL -> WAIT
     edges (counting semaphores) plus END/IRQ barriers. Also checks that each WAIT's signals appear
-    earlier in the stream (the dispatch-deadlock-freedom invariant). Returns summary stats."""
+    earlier in the stream (the dispatch-deadlock-freedom invariant), and that no semaphore ever has more
+    than ``sem_limit`` = 255 + 8 SIGNALs outstanding ahead of their WAITs in stream order: past that the
+    counter holds 255, the producer queue fills with stalled SIGNALs, the in-order dispatcher blocks and
+    the consuming WAIT is never dispatched (deadlock, docs/control.md §1 "Stream limit").
+    Returns summary stats (incl. ``max_outstanding_sem``)."""
     nq = 3
     vc_q = [np.zeros(nq, np.int64) for _ in range(nq)]  # current vector clock of each queue
     signals = {}   # sem -> list of vector clocks at signal time (stream order)
@@ -417,10 +426,17 @@ def check_hazards(cmds, ddr_base=0):
     own = []       # per work command: (queue, own seq number)
     shadow = _Shadow(nq)
     checked = 0
+    max_out = 0
     for c in cmds:
         q = c.queue
         if c.op == "SIGNAL":
-            signals.setdefault(c["sem"], []).append(vc_q[q].copy())
+            lst = signals.setdefault(c["sem"], [])
+            lst.append(vc_q[q].copy())
+            out = len(lst) - consumed.get(c["sem"], 0)
+            if out > sem_limit:
+                raise RaceError(f"semaphore {c['sem']}: {out} SIGNALs outstanding ahead of their WAITs "
+                                f"(> {sem_limit} = 255 + queue depth 8): the RTL in-order dispatcher deadlocks")
+            max_out = max(max_out, out)
             continue
         if c.op == "WAIT":
             s, k = c["sem"], c["count"]
@@ -460,7 +476,7 @@ def check_hazards(cmds, ddr_base=0):
                     sh[1 + p][blk] = -1
             else:
                 sh[1 + q][blk] = cid
-    return {"work_cmds": len(own), "pairs_checked": checked}
+    return {"work_cmds": len(own), "pairs_checked": checked, "max_outstanding_sem": max_out}
 
 
 # ---------------------------------------------------------------- host driver model (v1)

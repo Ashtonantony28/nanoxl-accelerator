@@ -7,7 +7,8 @@ greedy tokens with artifacts/models/tiny/golden_ref.json.
 Environment (set by tests/rtl/test_top.py):
   TOP_BUNDLE w8a8 | w4a8      TOP_KV onchip | ddr       TOP_LAYERS 0 = all, else truncate the model
   TOP_PROMPT tokens of the reference prompt to prefill   TOP_DECODE greedy decode steps after it
-  TOP_N, TOP_L array size / lanes (must equal the RTL parameters)   TOP_P_AXI random AXI stall prob.
+  TOP_N, TOP_L array size / lanes, TOP_VP VEC port lines (must equal the RTL parameters)
+  TOP_P_AXI random AXI stall prob.
   TOP_STRESS 1 = lowered shifts (every clamp fires)      TOP_PBUF_KB compiler's PBUF ring size
   TOP_PERF_JSON optional path: measured vs modelled cycles are written there
 """
@@ -29,7 +30,7 @@ from cocotbext.axi import AxiBus, AxiLiteBus, AxiLiteMaster, AxiRam, AxiReadBus
 from cocotbext.axi.axi_ram import AxiRamRead
 
 from nanoxl import isa
-from nanoxl.cyclemodel import simulate
+from nanoxl.cyclemodel import MEASURED, simulate
 from nanoxl.driver import NanoXL
 from nanoxl.driver import csr as R
 from nanoxl.driver.backends import Backend
@@ -176,7 +177,8 @@ async def top_tiny(dut):
     stress = env("TOP_STRESS", 0)
     n_prompt = env("TOP_PROMPT", 16)
     n_dec = env("TOP_DECODE", 8)
-    N, L = env("TOP_N", 8), env("TOP_L", 4)
+    N, L, VP = env("TOP_N", 8), env("TOP_L", 4), env("TOP_VP", 4)
+    tm = MEASURED.with_(vec_port_lines=VP)
     p_axi = env("TOP_P_AXI", 0.0)
     perf_json = os.environ.get("TOP_PERF_JSON", "")
     log = dut._log
@@ -237,7 +239,7 @@ async def top_tiny(dut):
                 bad = np.argwhere(logits != ref)
                 raise AssertionError(f"step {s}: logits differ at {len(bad)} entries, first {bad[0].tolist()} "
                                      f"rtl {logits[tuple(bad[0])]} golden {ref[tuple(bad[0])]}")
-            t = simulate(prog.cmds, hw)
+            t = simulate(prog.cmds, hw, tm=tm)
             res["steps"].append({"rows": len(feed), "pos": seqs[0][0], "cycles": dev.last_perf["cycles"],
                                  "model": t.cycles, "busy_dma": dev.last_perf["busy_dma"],
                                  "busy_arr": dev.last_perf["busy_arr"], "busy_vec": dev.last_perf["busy_vec"],
@@ -299,12 +301,12 @@ async def top_tiny(dut):
         assert res["tokens"] == ref_tokens[:len(res["tokens"])], (res["tokens"], ref_tokens[:len(res["tokens"])])
         log.info("tokens match golden_ref.json: %s", res["tokens"])
     for s in res["steps"]:
-        log.info("PERF %s N=%d L=%d kv=%s step pos=%d rows=%d: measured %d cycles, cyclemodel %d (%.2fx); "
-                 "busy dma/arr/vec %d/%d/%d model %s", bundle, N, L, kv_mode, s["pos"], s["rows"], s["cycles"],
+        log.info("PERF %s N=%d L=%d VP=%d kv=%s step pos=%d rows=%d: measured %d cycles, cyclemodel %d (%.2fx); "
+                 "busy dma/arr/vec %d/%d/%d model %s", bundle, N, L, VP, kv_mode, s["pos"], s["rows"], s["cycles"],
                  s["model"], s["cycles"] / max(1, s["model"]), s["busy_dma"], s["busy_arr"], s["busy_vec"],
                  s["model_busy"])
     if perf_json:
         Path(perf_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(perf_json).write_text(json.dumps({"bundle": bundle, "kv": kv_mode, "N": N, "L": L,
+        Path(perf_json).write_text(json.dumps({"bundle": bundle, "kv": kv_mode, "N": N, "L": L, "VP": VP,
                                                "layers": layers, "steps": res["steps"],
                                                "tokens": res["tokens"], "sat": sat}, indent=1))

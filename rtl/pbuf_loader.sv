@@ -1,8 +1,10 @@
 // pbuf_loader.sv -- PBUF parameter loader of the VEC engine (docs/sfu.md §10).
 //
-// Copies parameter blocks from PBUF (one 16-byte line per cycle over a line read port) into
-// the SFU configuration port (docs/sfu.md §2) or into the engine's requant record buffer,
-// and keeps track of which blocks are already resident in an SFU slot.
+// Copies parameter blocks from PBUF over a P-line read port into the SFU configuration port
+// (docs/sfu.md §2; one 16-byte line per cycle: one port beat per line, its line 0 used) or
+// into the engine's requant record buffer (P records per port beat: the beat's lines that lie
+// inside the block, rec_we[j] for record rec_idx + j), and keeps track of which blocks are
+// already resident in an SFU slot.
 //
 //   kind        block (docs/isa.md §3)                lines                    target
 //   K_LUT  0    LUT_LOAD table t (uint16[256])        32                       region t
@@ -16,18 +18,20 @@
 // same cols) is tagged valid is a hit and costs one cycle; otherwise the block is loaded
 // into the first invalid slot of its kind, or the round-robin victim, and tagged. A tag is
 // invalidated when any PBUF line inside [first, end) is written (snoop inputs: the DMA's
-// PBUF writes and the engine's own), and all tags are dropped by reset / engine clear. So
+// PBUF writes, one line, and the engine's own, a P-line beat with a mask of the lines that
+// carry a strobe), and all tags are dropped by reset / engine clear. So
 // a hit always returns exactly the bytes PBUF holds now, for any program. K_REC is never
 // cached (records go to a single buffer that each REQUANT chunk overwrites).
 //
-// Cost of a miss: n line reads, pipelined with up to FD in flight, so n + (read latency)
-// + 2 cycles; a hit costs 1 cycle.
+// Cost of a miss: n line reads (ceil(n/P) beats for records), pipelined with up to FD in
+// flight, so n + (read latency) + 2 cycles; a hit costs 1 cycle.
 module pbuf_loader #(
     parameter int AW    = 17,
     parameter int NSLOT = 16,
     parameter int NG    = 4,
     parameter int NCTX  = 8,
-    parameter int FD    = 16
+    parameter int FD    = 16,
+    parameter int P     = 1
 ) (
     input  logic           clk,
     input  logic           rst_n,
@@ -46,14 +50,14 @@ module pbuf_loader #(
     // PBUF write snoop
     input  logic           snoop0_valid,
     input  logic [AW-1:0]  snoop0_line,
-    input  logic           snoop1_valid,
+    input  logic [P-1:0]   snoop1_valid,     // line snoop1_line + j written
     input  logic [AW-1:0]  snoop1_line,
     // PBUF line read port
     output logic           ar_valid,
     input  logic           ar_ready,
     output logic [AW-1:0]  ar_addr,
     input  logic           r_valid,
-    input  logic [127:0]   r_data,
+    input  logic [P*128-1:0] r_data,
     // SFU configuration port
     output logic           cfg_we,
     output logic [3:0]     cfg_region,
@@ -62,9 +66,9 @@ module pbuf_loader #(
     output logic [12:0]    cfg_cols,
     output logic [127:0]   cfg_data,
     // requant records: index, {ls, shift, mult, bias} as the 4 int32 words of the record
-    output logic           rec_we,
+    output logic [P-1:0]   rec_we,
     output logic [12:0]    rec_idx,
-    output logic [127:0]   rec_data,
+    output logic [P*128-1:0] rec_data,
     // statistics (cleared by reset only)
     output logic [31:0]    st_hits,
     output logic [31:0]    st_misses,
@@ -130,7 +134,13 @@ module pbuf_loader #(
     int            victim;
 
     assign idle     = !busy && !fin;
-    assign ar_valid = busy && !flush && (n_req != n_tot) && (32'(inflight) < FD);
+    // records: P lines per port beat; SFU blocks: one line per beat (the cfg port's rate)
+    logic [13:0] step, n_rl;
+    logic [P-1:0] rsp_m;
+    assign step     = (k_kind == K_REC) ? 14'(P) : 14'd1;
+    assign n_rl     = (n_tot - n_rsp < step) ? n_tot - n_rsp : step;   // lines in the next response
+    always_comb for (int j = 0; j < P; j++) rsp_m[j] = 14'(j) < n_rl;
+    assign ar_valid = busy && !flush && (n_req < n_tot) && (32'(inflight) < FD);
     assign ar_addr  = k_base + AW'(n_req);
 
     always_comb begin
@@ -168,9 +178,12 @@ module pbuf_loader #(
             fin  <= 1'b0;
             // snoop invalidation (before a new tag is set in the same cycle)
             for (int e = 0; e < NT; e++) begin
-                if ((snoop0_valid && snoop0_line >= t_line[e] && {1'b0, snoop0_line} < t_end[e]) ||
-                    (snoop1_valid && snoop1_line >= t_line[e] && {1'b0, snoop1_line} < t_end[e]))
+                if (snoop0_valid && snoop0_line >= t_line[e] && {1'b0, snoop0_line} < t_end[e])
                     t_v[e] <= 1'b0;
+                for (int j = 0; j < P; j++)
+                    if (snoop1_valid[j] && {1'b0, snoop1_line} + (AW+1)'(j) >= {1'b0, t_line[e]} &&
+                        {1'b0, snoop1_line} + (AW+1)'(j) < t_end[e])
+                        t_v[e] <= 1'b0;
             end
             if (req_valid && !busy && !fin) begin
                 if (req_kind != K_REC && f_hit) begin
@@ -205,10 +218,10 @@ module pbuf_loader #(
             end
             if (fin) done <= 1'b1;
             if (busy) begin
-                if (ar_valid && ar_ready) n_req <= n_req + 14'd1;
+                if (ar_valid && ar_ready) n_req <= n_req + step;
                 if (acc_rsp) begin
-                    n_rsp <= n_rsp + 14'd1;
-                    if (n_rsp + 14'd1 == n_tot) begin
+                    n_rsp <= n_rsp + n_rl;
+                    if (n_rsp + n_rl == n_tot) begin
                         busy <= 1'b0;
                         fin  <= 1'b1;
                     end
@@ -221,16 +234,16 @@ module pbuf_loader #(
     always_ff @(posedge clk) begin
         if (!rst_i) begin
             cfg_we <= 1'b0;
-            rec_we <= 1'b0;
+            rec_we <= '0;
         end else begin
             cfg_we     <= busy && acc_rsp && k_kind != K_REC;
-            rec_we     <= busy && acc_rsp && k_kind == K_REC;
+            rec_we     <= (busy && acc_rsp && k_kind == K_REC) ? rsp_m : '0;
         end
         cfg_region <= k_region;
         cfg_slot   <= (k_kind == K_LUT) ? 8'd0 : k_slot;
         cfg_line   <= 12'(n_rsp);
         cfg_cols   <= k_cols;
-        cfg_data   <= r_data;
+        cfg_data   <= r_data[127:0];
         rec_idx    <= 13'(n_rsp);
         rec_data   <= r_data;
     end
@@ -243,7 +256,7 @@ module pbuf_loader #(
                 if (f_hit) st_hits <= st_hits + 32'd1;
                 else       st_misses <= st_misses + 32'd1;
             end
-            if (busy && acc_rsp) st_lines <= st_lines + 32'd1;
+            if (busy && acc_rsp) st_lines <= st_lines + 32'(n_rl);
         end
     end
 endmodule

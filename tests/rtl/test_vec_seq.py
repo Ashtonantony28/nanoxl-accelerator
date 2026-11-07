@@ -1,4 +1,5 @@
-"""pytest wrappers: rtl/vec_seq.sv, the VEC engine (docs/vector-unit.md §9)."""
+"""pytest wrappers: rtl/vec_seq.sv, the VEC engine (docs/vector-unit.md §9), at PL = 1 (16-byte
+line ports) and PL = 4 (64-byte ports, the nanoxl_top default)."""
 import os
 
 import pytest
@@ -17,19 +18,22 @@ VERILATOR = os.environ.get("SIM", "icarus") == "verilator"
 _SLOW_ON_ICARUS = () if VERILATOR else (pytest.mark.slow,)
 
 
-@pytest.mark.parametrize("L", [4, pytest.param(16, marks=_SLOW_ON_ICARUS)])
-def test_vec_seq(L):
+@pytest.mark.parametrize("L,PL", [(4, 1), (4, 4), pytest.param(16, 1, marks=_SLOW_ON_ICARUS),
+                                  pytest.param(16, 4, marks=_SLOW_ON_ICARUS)])
+def test_vec_seq(L, PL):
     """All benches of vec_seq_cocotb: smoke, random (two port regimes), tiny W8A8 prefill + decode,
-    errors, clear/reset mid-command, residency."""
+    errors, clear/reset mid-command, residency; PL-line ports (beats at any line, ragged ends)."""
     n = (150 if L == 4 else 100) if VERILATOR else (40 if L == 4 else 25)
-    run("vec_seq", SRC, "vec_seq_cocotb", parameters={"L": L},
-        extra_env={"L": str(L), "N_CMDS": str(n), "TINY_T": "6" if L == 4 else "8"})
+    run("vec_seq", SRC, "vec_seq_cocotb", parameters={"L": L, "PL": PL},
+        extra_env={"L": str(L), "PL": str(PL), "N_CMDS": str(n), "TINY_T": "6" if L == 4 else "8"})
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(not VERILATOR, reason="KV260 lane count; Verilator only")
-def test_vec_seq_l64():
+@pytest.mark.parametrize("PL", [1, 4])
+def test_vec_seq_l64(PL):
     """L = 64 (KV260): random commands and a 16-token prefill + decode of the tiny bundle, with the
     'changed' snoop (parameters stay resident across the two programs)."""
-    run("vec_seq", SRC, "vec_seq_cocotb", parameters={"L": 64},
-        extra_env={"L": "64", "N_CMDS": "60", "TINY_T": "16", "TINY_SNOOP": "changed"}, tag="_l64")
+    run("vec_seq", SRC, "vec_seq_cocotb", parameters={"L": 64, "PL": PL},
+        extra_env={"L": "64", "PL": str(PL), "N_CMDS": "60", "TINY_T": "16", "TINY_SNOOP": "changed"},
+        tag="_l64")

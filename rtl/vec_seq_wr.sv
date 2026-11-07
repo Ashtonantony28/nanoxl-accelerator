@@ -1,17 +1,21 @@
 // vec_seq_wr.sv -- VEC engine destination stream: packs vec_unit D beats (L int32 lanes,
-// keep, last) into 16-byte lines of 2^ebl-byte elements (the low bytes of each lane) and
-// writes them over a scratchpad line write port, at the line addresses of a row set
-// (vec_seq_walk). Byte strobes are the lanes' keep bits, so a row's final partial line
-// writes only the row's own bytes. Each row starts on a line boundary.
+// keep, last) into P-line (16P-byte) port beats of 2^ebl-byte elements (the low bytes of
+// each lane) and writes them over a scratchpad write port, at the beat addresses of a row
+// set (vec_seq_walk: from the row's first line, P lines apart). Byte strobes are the lanes'
+// keep bits, so a row's final ragged beat writes only the row's own bytes (lines past the
+// row end, and bytes past the row end in its last line, have strobe 0). Each row starts on
+// a line boundary.
 //
-// Write port (same shape as the DMA's sp_* write side, docs/control.md §3):
-//   w_valid/w_ready, w_buf, w_addr (line), w_data[127:0], w_strb[15:0]
+// Write port (the DMA's sp_* write shape, docs/control.md §3, P lines per beat):
+//   w_valid/w_ready, w_buf, w_addr (first line), w_data[128P-1:0], w_strb[16P-1:0]
+//   (line j in data bits [128j +: 128], strobes [16j +: 16])
 // A write is complete (visible to later reads) when it is accepted.
 // A 2-entry FIFO sits in front of the port, so i_ready never depends on w_ready
 // combinationally.
 module vec_seq_wr #(
     parameter int L  = 4,
-    parameter int AW = 17
+    parameter int AW = 17,
+    parameter int P  = 1
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -36,13 +40,16 @@ module vec_seq_wr #(
     input  logic            w_ready,
     output logic [2:0]      w_buf,
     output logic [AW-1:0]   w_addr,
-    output logic [127:0]    w_data,
-    output logic [15:0]     w_strb
+    output logic [P*128-1:0] w_data,
+    output logic [P*16-1:0]  w_strb
 );
     localparam int LL = $clog2(L);
-    localparam int BB = 4 * L;                    // bytes of a beat at int32
-    localparam int AL = (L > 4) ? L / 4 : 1;      // lines of a beat at int32
-    localparam int FW = 3 + AW + 128 + 16;
+    localparam int PL = $clog2(P);
+    localparam int CB = 16 * P;                   // bytes of a port beat ("chunk")
+    localparam int BB = 4 * L;                    // bytes of a vec_unit beat at int32
+    localparam int HB = (BB > CB) ? BB : CB;      // holding register bytes
+    localparam int AL = (BB > CB) ? BB / CB : 1;  // chunks of a beat at int32
+    localparam int FW = 3 + AW + CB * 8 + CB;
 
     logic rst_i;
     assign rst_i = rst_n && !clr;
@@ -61,15 +68,15 @@ module vec_seq_wr #(
     // ---------------- walker (address of each pushed line) ----------------
     logic          w_act, w_step, w_rll;
     logic [AW-1:0] wk_addr;
-    vec_seq_walk #(.AW(AW)) u_walk (
+    vec_seq_walk #(.AW(AW), .P(P)) u_walk (
         .clk(clk), .rst_n(rst_i), .start(start && !busy), .base(d_base), .so(d_so), .no(d_no),
         .si(d_si), .ni(d_ni), .len(d_len), .len_last(d_len_last), .ebl(d_ebl),
         .step(w_step), .act(w_act), .addr(wk_addr), .row_last_line(w_rll)
     );
 
     // ---------------- pack one beat into bytes + strobes ----------------
-    logic [BB*8-1:0] pb;
-    logic [BB-1:0]   ps;
+    logic [HB*8-1:0] pb;
+    logic [HB-1:0]   ps;
     always_comb begin
         pb = '0;
         ps = '0;
@@ -84,8 +91,8 @@ module vec_seq_wr #(
 
     // ---------------- line FIFO to the port ----------------
     logic          f_in_valid, f_in_ready, f_out_valid;
-    logic [127:0]  f_data_in;
-    logic [15:0]   f_strb_in;
+    logic [CB*8-1:0] f_data_in;
+    logic [CB-1:0]   f_strb_in;
     logic [FW-1:0] f_out;
     logic [1:0]    f_cnt;
     fifo_sync #(.W(FW), .DEPTH(2)) u_fifo (
@@ -97,46 +104,46 @@ module vec_seq_wr #(
     assign {w_buf, w_addr, w_data, w_strb} = f_out;
     assign w_step  = f_in_valid && f_in_ready;
 
-    // ---------------- wide beats (>= 16 bytes): one beat -> several lines ----------------
+    // ---------------- wide beats (>= CB bytes): one beat -> several chunks ----------------
     logic            hv;
-    logic [BB*8-1:0] hb;
-    logic [BB-1:0]   hs;
-    logic [7:0]      hm, hn;                      // current line, last line with a strobe
-    // ---------------- narrow beats (< 16 bytes): several beats -> one line ----------------
-    logic [127:0]    cl;
-    logic [15:0]     cs;
-    logic [3:0]      sub;
+    logic [HB*8-1:0] hb;
+    logic [HB-1:0]   hs;
+    logic [7:0]      hm, hn;                      // current chunk, last chunk with a strobe
+    // ---------------- narrow beats (< CB bytes): several beats -> one chunk ----------------
+    logic [CB*8-1:0] cl;
+    logic [CB-1:0]   cs;
+    logic [6:0]      sub;
     logic            wide;
-    assign wide = (lb_l2 >= 4'd4);
+    assign wide = (lb_l2 >= 4'(4 + PL));
 
     logic [7:0] last_line;
     always_comb begin
         last_line = '0;
-        for (int m = 0; m < AL; m++) if (|ps[m*16 +: 16]) last_line = 8'(m);
+        for (int m = 0; m < AL; m++) if (|ps[m*CB +: CB]) last_line = 8'(m);
     end
 
-    // narrow: merge the incoming beat into the line at slice `sub`
-    logic [127:0] cl_n;
-    logic [15:0]  cs_n;
-    logic         nl_done;
+    // narrow: merge the incoming beat into the chunk at slice `sub`
+    logic [CB*8-1:0] cl_n;
+    logic [CB-1:0]   cs_n;
+    logic            nl_done;
     always_comb begin
         cl_n = cl;
         cs_n = cs;
-        for (int p = 0; p < 16; p++) begin
+        for (int p = 0; p < CB; p++) begin
             if ((p >> lb_l2) == int'(sub)) begin
                 cl_n[p*8 +: 8] = pb[(p & ((1 << lb_l2) - 1))*8 +: 8] & {8{ps[p & ((1 << lb_l2) - 1)]}};
                 cs_n[p]        = ps[p & ((1 << lb_l2) - 1)];
             end
         end
-        nl_done = (sub == 4'((16 >> lb_l2) - 1)) || i_last;
+        nl_done = (sub == 7'((CB >> lb_l2) - 1)) || i_last;
     end
 
     always_comb begin
         if (wide) begin
             i_ready    = !hv || (f_in_ready && hm == hn);
             f_in_valid = hv;
-            f_data_in  = hb[int'(hm)*128 +: 128];
-            f_strb_in  = hs[int'(hm)*16 +: 16];
+            f_data_in  = hb[int'(hm)*CB*8 +: CB*8];
+            f_strb_in  = hs[int'(hm)*CB +: CB];
         end else begin
             i_ready    = f_in_ready;
             f_in_valid = i_valid && nl_done;
@@ -169,7 +176,7 @@ module vec_seq_wr #(
                 cl  <= '0;
                 cs  <= '0;
             end else begin
-                sub <= sub + 4'd1;
+                sub <= sub + 7'd1;
                 cl  <= cl_n;
                 cs  <= cs_n;
             end

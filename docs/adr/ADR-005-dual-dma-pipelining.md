@@ -93,12 +93,13 @@ fewer bytes so far, so each channel carries 40–60 % of the weight bytes. KV lo
 * `cmd_queue` now has its own FIFO (the same behaviour as `fifo_sync`) so the formal proof can
   see its entries. The proof (`queue`: QDEPTH 2, MAXOUT 2, NCH 2, PSIG 2) shows by k-induction
   that a carried SIGNAL fires only after every earlier engine command on each channel is done.
-* Measured, the tiny `test_top` decode is 8.8 % faster (W8A8) at 75-cycle DDR latency (§Measurements).
-  Tiny is array/VEC bound at N = 16, so the large gain is the modelled one at shakespeare scale.
+* Measured on tiny `test_top` at 75-cycle DDR read latency, decode is 10.5 % faster for W8A8 and 6.2 %
+  for W4A8; prefill is 4.9 % / 2.8 % faster; the model is within 0.1 % on decode. Tiny is array bound
+  at N = 16, so the large gain is the modelled one at shakespeare scale.
 
 ## Measurements
 
-See `docs/top.md` §6 for the full tables. Modelled shakespeare (`estimate(SHAKESPEARE, board)`,
+Measured tiny cycles (before / after, AXI latency 0 and 75) are in `docs/top.md` §6.1. Modelled shakespeare (`estimate(SHAKESPEARE, board)`,
 `PRE_SG10A` vs built):
 
 | board, W | decode tok/s before → after | DDR weight bound | prefill ms before → after |

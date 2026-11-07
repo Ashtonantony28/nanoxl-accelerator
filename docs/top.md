@@ -186,9 +186,30 @@ exercised by the AxiRam). Prefill is now ARRAY + DMA bound at this size; the rem
 is the int32 softmax / REQUANT and the SFU per-row fixed costs (docs/vector-unit.md §9.3).
 
 Modelled KV260 shakespeare (N = 32, L = 64, 256-token prefill, `estimate(SHAKESPEARE, KV260)`): prefill
-17.6 → 14.7 ms, array utilization 0.66 → 0.78 (W8A8; W4A8 the same), decode unchanged (332 / 594 tok/s
-W8A8 / W4A8, single-DMA-master bound). The prefill critical path is 77 % GEMM, 8 % softmax (int32
+17.6 → 14.7 ms, array utilization 0.66 → 0.78 (W8A8; W4A8 the same), decode unchanged by SG10b (332 / 594
+tok/s W8A8 / W4A8, single-DMA-master bound; see below for SG10a). The prefill critical path is 77 % GEMM, 8 % softmax (int32
 scores at 16 per cycle), 7 % attention GEMMs, 4 % LN.
+
+### 6.1 Two DMA masters, pipelined DMA, carried SIGNALs (SG10a, ADR-005)
+
+Same programs and tables as above, on-chip KV, VP = 4. "Before" is main with SG10b and without SG10a
+(one master, one DMA command at a time, blocking SIGNALs). `TOP_AXI_LAT` = pipelined read latency in
+cycles on every read master (AR → first R beat; 75 cycles = the model's 300 ns DDR latency at 250 MHz):
+
+| bundle, AXI latency | prefill: before → after (model) | decode (pos 16..23): before → after (model) |
+|---|---|---|
+| W8A8, 75 cycles | 81,573 → 77,598 (−4.9 %; 79,088) | 70,783–70,895 → 63,319–63,431 (−10.5 %; 63,269–63,381) |
+| W4A8, 75 cycles | 85,628 → 83,266 (−2.8 %; 83,287) | 74,400–74,512 → 69,755–69,869 (−6.2 %; 69,760–69,872) |
+| W8A8, 0 (no stalls) | 80,098 → 76,394 (−4.6 %) | 66,104–66,216 → 61,923–62,035 (−6.3 %) |
+| W4A8, 0 (no stalls) | 84,342 → 82,598 (−2.1 %) | 71,958–72,070 → 68,730–68,842 (−4.5 %) |
+
+At 75 cycles the model matches the decode steps within 0.1 %. DMA busy in W8A8 decode falls
+61.9k → 50.9k cycles. Tiny at N = 16 is now array bound (ARRAY busy 54–57k of 63k cycles), so the
+measured gain is small. The large gain is at shakespeare scale, where decode streams 10.6 MB of INT8 weights
+per token. Modelled (`estimate(SHAKESPEARE, board)`, built timing vs `PRE_SG10A`): KV260 W8A8 decode
+332 → 619 tok/s (DDR weight bound 752), W4A8 594 → 651 (array bound); PYNQ-Z2 99 → 128 / 175 → 186.
+KV260 prefill 14.7 → 14.0 ms. The measurement runs are `TOP_AXI_LAT=75 TOP_PERF_DIR=<dir>
+SIM=verilator pytest tests/rtl/test_top.py -k "tiny and onchip and not vp1"`.
 
 ## 7. Lint
 

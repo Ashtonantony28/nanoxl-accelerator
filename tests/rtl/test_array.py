@@ -14,7 +14,12 @@ def test_array_core(n):
         extra_env={"ARR_N": str(n)})
 
 
-@pytest.mark.parametrize("n", [4, 8, 16])
+_ICARUS = os.environ.get("SIM", "icarus") != "verilator"
+# N=16 takes ~110 s on Icarus: fast tier on Verilator, slow tier on Icarus (AUDIT-1 A1-10)
+_SLOW_ON_ICARUS = (pytest.mark.slow,) if _ICARUS else ()
+
+
+@pytest.mark.parametrize("n", [4, 8, pytest.param(16, marks=_SLOW_ON_ICARUS)])
 def test_array_ctrl(n):
     run("array_ctrl", CTRL, "array_ctrl_cocotb", parameters={"N": n, "M_DEPTH": 64},
         extra_env={"ARR_N": str(n), "ARR_MDEPTH": "64"})

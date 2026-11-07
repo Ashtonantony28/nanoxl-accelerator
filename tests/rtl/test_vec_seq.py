@@ -13,7 +13,11 @@ SRC = ["rtl/fifo_sync.sv", "rtl/cmd_fields.sv", "rtl/lut_rom.sv", "rtl/sfu_exp2.
 VERILATOR = os.environ.get("SIM", "icarus") == "verilator"
 
 
-@pytest.mark.parametrize("L", [4, 16])
+# L=16 takes ~85 s on Icarus: fast tier on Verilator, slow tier on Icarus (AUDIT-1 A1-10)
+_SLOW_ON_ICARUS = () if VERILATOR else (pytest.mark.slow,)
+
+
+@pytest.mark.parametrize("L", [4, pytest.param(16, marks=_SLOW_ON_ICARUS)])
 def test_vec_seq(L):
     """All benches of vec_seq_cocotb: smoke, random (two port regimes), tiny W8A8 prefill + decode,
     errors, clear/reset mid-command, residency."""

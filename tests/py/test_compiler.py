@@ -161,7 +161,8 @@ def test_compiler_batch_kv_capacity():
     Compiler(g, p, KV260.with_(kv_onchip=False), n_slots=8)
 
 
-@pytest.mark.parametrize("cfg", [SHAKESPEARE, SHAKESPEARE.with_(wbits=4), M25], ids=lambda c: f"{c.name}-w{c.wbits}")
+@pytest.mark.parametrize("cfg", [SHAKESPEARE, SHAKESPEARE.with_(wbits=4), pytest.param(M25, marks=pytest.mark.slow)],
+                         ids=lambda c: f"{c.name}-w{c.wbits}")   # m25 (~28 s) in the slow tier (AUDIT-1 A1-10)
 def test_compiler_real_models_fit_isa_fields(cfg):
     """Every command of a full prefill and a late decode step validates (field widths suffice)."""
     g = build_gpt_graph(cfg)

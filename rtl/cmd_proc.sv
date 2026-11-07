@@ -14,6 +14,9 @@
 // captured with the ring index and the word. Only a (soft) reset clears it.
 // Single-step: with step_mode = 1, each step_pulse lets exactly one word be dispatched
 // (or one barrier execute).
+// DMA (SG10a, ADR-005): the DMA queue dispatches to two DMA engines (channels) selected by the
+// command's chan[0]; DMA_STORE is a fence across both channels; SIGNALs of every queue are
+// carried on done (cmd_queue.sv).
 module cmd_proc #(
     parameter int PW     = 24,
     parameter int QDEPTH = 8,
@@ -35,11 +38,11 @@ module cmd_proc #(
     input  logic            cfg_err,       // ring configuration error (from the fetcher)
     input  logic            dma_err,       // DMA engine error (AXI response or bad command)
     input  logic [1:0]      eng_err,       // ARRAY / VEC engine error inputs
-    // engines: index 0 DMA, 1 ARRAY, 2 VEC
-    output logic [2:0]      eng_valid,
-    input  logic [2:0]      eng_ready,
+    // engines: index 0 DMA channel 0, 1 ARRAY, 2 VEC, 3 DMA channel 1 (word on eng_word[0])
+    output logic [3:0]      eng_valid,
+    input  logic [3:0]      eng_ready,
     output logic [3*128-1:0] eng_word,
-    input  logic [2:0]      eng_done,
+    input  logic [3:0]      eng_done,
     // status
     output logic            halted,
     output logic [3:0]      err_code,
@@ -51,7 +54,7 @@ module cmd_proc #(
     output logic            all_idle,       // queues idle and no word waiting at a barrier
     output logic [2:0]      q_idle,
     output logic [2:0]      eng_busy,
-    output logic [2:0]      retire_inc,     // commands completed this cycle (0..7)
+    output logic [3:0]      retire_inc,     // commands completed this cycle (0..10)
     output logic [PW-1:0]   last_index,     // ring index of the last dispatched word
     output logic            q_overflow,
     input  logic [4:0]      sem_dbg_sel,
@@ -72,7 +75,7 @@ module cmd_proc #(
 
     // ---------------- queues + semaphores ----------------
     logic [2:0]  q_in_valid, q_in_ready, q_ovf;
-    logic [1:0]  q_retire [0:2];
+    logic [2:0]  q_retire [0:2];
     logic [1:0]  q_kind;
     logic [127:0] q_word;
     logic [2:0]  sig_req, sig_gnt, wait_req, wait_gnt;
@@ -83,11 +86,28 @@ module cmd_proc #(
     assign q_kind = (d_kind == K_WAIT) ? 2'd1 : (d_kind == K_SIGNAL) ? 2'd2 : 2'd0;
     assign q_word = (d_kind == K_ENGINE) ? in_word : {115'b0, d_wcnt, d_sem};
 
+    // DMA channel = chan[0] (word bit 6); DMA_STORE (opcode 0x09) is a cross-channel fence
+    logic q_ch, q_fence;
+    assign q_ch    = (d_kind == K_ENGINE) && in_word[6];
+    assign q_fence = (d_kind == K_ENGINE) && (in_word[5:0] == 6'h09);
+
+    cmd_queue #(.QDEPTH(QDEPTH), .MAXOUT(MAXOUT), .NCH(2)) u_qd (
+        .clk(clk), .rst_n(rst_n), .clr(clr), .hold(hold),
+        .in_valid(q_in_valid[0]), .in_ready(q_in_ready[0]), .in_kind(q_kind), .in_ch(q_ch),
+        .in_fence(q_fence), .in_word(q_word),
+        .eng_valid({eng_valid[3], eng_valid[0]}), .eng_ready({eng_ready[3], eng_ready[0]}),
+        .eng_word(eng_word[0 +: 128]), .eng_done({eng_done[3], eng_done[0]}),
+        .sig_req(sig_req[0]), .sig_sem(sig_sem[0 +: 5]), .sig_gnt(sig_gnt[0]),
+        .wait_req(wait_req[0]), .wait_sem(wait_sem[0 +: 5]), .wait_cnt(wait_cnt[0 +: 8]),
+        .wait_gnt(wait_gnt[0]),
+        .idle(q_idle[0]), .eng_busy(eng_busy[0]), .retire(q_retire[0]), .overflow(q_ovf[0]));
+
     genvar gq;
-    for (gq = 0; gq < 3; gq++) begin : g_q
-        cmd_queue #(.QDEPTH(QDEPTH), .MAXOUT(MAXOUT)) u_q (
+    for (gq = 1; gq < 3; gq++) begin : g_q
+        cmd_queue #(.QDEPTH(QDEPTH), .MAXOUT(MAXOUT), .NCH(1)) u_q (
             .clk(clk), .rst_n(rst_n), .clr(clr), .hold(hold),
-            .in_valid(q_in_valid[gq]), .in_ready(q_in_ready[gq]), .in_kind(q_kind), .in_word(q_word),
+            .in_valid(q_in_valid[gq]), .in_ready(q_in_ready[gq]), .in_kind(q_kind), .in_ch(1'b0),
+            .in_fence(1'b0), .in_word(q_word),
             .eng_valid(eng_valid[gq]), .eng_ready(eng_ready[gq]), .eng_word(eng_word[gq*128 +: 128]),
             .eng_done(eng_done[gq]),
             .sig_req(sig_req[gq]), .sig_sem(sig_sem[gq*5 +: 5]), .sig_gnt(sig_gnt[gq]),
@@ -162,6 +182,6 @@ module cmd_proc #(
     end
 
     // retired-command count: queue completions plus executed barriers
-    assign retire_inc = 3'(q_retire[0]) + 3'(q_retire[1]) + 3'(q_retire[2]) + 3'(irq_pulse || end_pulse);  // <= 7
+    assign retire_inc = 4'(q_retire[0]) + 4'(q_retire[1]) + 4'(q_retire[2]) + 4'(irq_pulse || end_pulse);  // <= 10
     assign q_overflow = |q_ovf;
 endmodule

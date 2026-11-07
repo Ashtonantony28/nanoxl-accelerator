@@ -1,6 +1,6 @@
 """nanoxl_top end to end (SG7c, docs/top.md §5): the real host driver (nanoxl.driver.NanoXL) runs in a
 cocotb bridge thread and talks to the RTL through an AXI4-Lite master (CSRs) and a cocotbext-axi
-AxiRam that holds the DDR image (fetch master and DMA master share one memory). Every step's int16
+AxiRams that hold the DDR image (the fetch master and both DMA masters share one memory). Every step's int16
 logits, the final KV cache and the per-op saturation counters are compared with nanoxl.golden; the
 greedy tokens with artifacts/models/tiny/golden_ref.json.
 
@@ -11,6 +11,7 @@ Environment (set by tests/rtl/test_top.py):
   TOP_P_AXI random AXI stall prob.
   TOP_STRESS 1 = lowered shifts (every clamp fires)      TOP_PBUF_KB compiler's PBUF ring size
   TOP_PERF_JSON optional path: measured vs modelled cycles are written there
+  TOP_AXI_LAT read latency in clock cycles (AR -> first R beat, pipelined) on every read master; 0 = none
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from cocotb.triggers import ClockCycles, First, ReadOnly, RisingEdge
 from cocotbext.axi import AxiBus, AxiLiteBus, AxiLiteMaster, AxiRam, AxiReadBus
 from cocotbext.axi.axi_ram import AxiRamRead
 
+from ctrl_common_cocotb import add_read_latency
 from nanoxl import isa
 from nanoxl.cyclemodel import MEASURED, simulate
 from nanoxl.driver import NanoXL
@@ -181,20 +183,26 @@ async def top_tiny(dut):
     tm = MEASURED.with_(vec_port_lines=VP)
     p_axi = env("TOP_P_AXI", 0.0)
     perf_json = os.environ.get("TOP_PERF_JSON", "")
+    axi_lat = env("TOP_AXI_LAT", 0)
     log = dut._log
-    for n in ("md_axi", "mf_axi", "s_axil"):
+    for n in ("md_axi", "md1_axi", "mf_axi", "s_axil"):
         logging.getLogger(f"cocotb.{dut._name}.{n}").setLevel(logging.WARNING)
 
     cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
     mem = mmap.mmap(-1, 1 << 32)
     ram = AxiRam(AxiBus.from_prefix(dut, "md_axi"), dut.clk, dut.rst_n, reset_active_level=False,
                  size=1 << 32, mem=mem)
+    ram1 = AxiRam(AxiBus.from_prefix(dut, "md1_axi"), dut.clk, dut.rst_n, reset_active_level=False,
+                  size=1 << 32, mem=mem)
     fram = AxiRamRead(AxiReadBus.from_prefix(dut, "mf_axi"), dut.clk, dut.rst_n,
                       reset_active_level=False, size=1 << 32, mem=mem)
     axil = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axil"), dut.clk, dut.rst_n,
                          reset_active_level=False)
-    for lg in (ram.write_if.log, ram.read_if.log, fram.log, axil.write_if.log, axil.read_if.log):
+    for lg in (ram.write_if.log, ram.read_if.log, ram1.write_if.log, ram1.read_if.log, fram.log,
+               axil.write_if.log, axil.read_if.log):
         lg.setLevel(logging.WARNING)
+    for rif in (ram.read_if, ram1.read_if, fram):
+        add_read_latency(rif, axi_lat, 4)
     if p_axi:
         rng = random.Random(1)
 
@@ -203,7 +211,9 @@ async def top_tiny(dut):
             while True:
                 yield r.random() < p
         for ch in (ram.read_if.ar_channel, ram.read_if.r_channel, ram.write_if.aw_channel,
-                   ram.write_if.w_channel, ram.write_if.b_channel, fram.ar_channel, fram.r_channel):
+                   ram.write_if.w_channel, ram.write_if.b_channel, fram.ar_channel, fram.r_channel,
+                   ram1.read_if.ar_channel, ram1.read_if.r_channel, ram1.write_if.aw_channel,
+                   ram1.write_if.w_channel, ram1.write_if.b_channel):
             ch.set_pause_generator(pause(p_axi))
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 8)

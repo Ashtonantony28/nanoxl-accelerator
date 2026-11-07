@@ -3,8 +3,8 @@ queue / semaphore / fetch semantics, critical-path attribution and model-level s
 import pytest
 
 from nanoxl import isa
-from nanoxl.cyclemodel import (FIXES, MEASURED, VEC_CAL, ModelError, RtlTiming, cost, estimate, simulate,
-                               timing_for)
+from nanoxl.cyclemodel import (FIXES, MEASURED, PRE_SG10A, VEC_CAL, ModelError, RtlTiming, cost, estimate,
+                               simulate, timing_for)
 from nanoxl.graph import SHAKESPEARE, TINY
 from nanoxl.hwconfig import KV260, PYNQ_Z2
 
@@ -13,27 +13,53 @@ LAT = 75  # KV260: 300 ns at 250 MHz
 
 
 def test_cyclemodel_dma_cost_measured():
-    hw = KV260  # 8 GB/s = 32 B/cycle DDR, but one 128-bit master = 16 B/cycle
+    hw = KV260  # 8 GB/s = 32 B/cycle DDR; one 128-bit master (engine) = 16 B/cycle
+    pre = MEASURED.with_(**PRE_SG10A)
+    gap = MEASURED.dma_cmd_gap
+    # SG10a engine (pipelined): occupancy = beats + bubble + hand-off, the AR latency overlaps the
+    # previous command (it is the completion latency)
     occ, lat, info = cost(C("DMA_LOAD", rows=1, row_bytes=32768), hw)
-    assert (occ, lat) == (LAT + 32768 // 16 + 1, 0) and info["ddr_bytes"] == 32768   # not pipelined
+    assert (occ, lat) == (32768 // 16 + 1 + gap, LAT) and info["ddr_bytes"] == 32768
+    assert cost(C("DMA_LOAD", rows=1, row_bytes=32768), hw, pre)[:2] == (LAT + 32768 // 16 + 1, 0)
     # strided small rows: one burst per row, 4 outstanding -> 4 rows per DDR latency
-    occ2, _, _ = cost(C("DMA_LOAD", rows=1024, row_bytes=8, ddr_stride=64), hw)
+    occ2, _, _ = cost(C("DMA_LOAD", rows=1024, row_bytes=8, ddr_stride=64), hw, pre)
     assert occ2 == LAT + (1024 // 4 - 1) * LAT + 1024
-    # contiguous 64-byte rows (the compiler's int8 weight panels) are burst bound too...
+    # contiguous 64-byte rows are burst bound too...
     panel = C("DMA_LOAD", rows=384, row_bytes=64, ddr_stride=64)
-    assert cost(panel, hw)[0] == LAT + (384 // 4 - 1) * LAT + 384
-    # ...unless coalesced into one row (what-if): 1536 beats + one bubble
-    assert cost(panel, hw, MEASURED.with_(dma_coalesce=True))[0] == LAT + 1536 + 1
+    assert cost(panel, hw, pre)[0] == LAT + (384 // 4 - 1) * LAT + 384
+    # ...unless coalesced into one row (the compiler does): 1536 beats + one bubble
+    assert cost(panel, hw, pre.with_(dma_coalesce=True))[0] == LAT + 1536 + 1
     # unaligned DDR start touches one more beat per row
-    assert cost(C("DMA_LOAD", rows=1, row_bytes=32, ddr_addr=8), hw)[0] == LAT + 3 + 1
-    # pipelined (what-if): latency leaves the occupancy
-    occ3, lat3, _ = cost(C("DMA_STORE", rows=1, row_bytes=32768), hw, MEASURED.with_(dma_pipelined=True))
-    assert (occ3, lat3) == (2048 + 1, LAT)
-    # two masters: DDR (32 B/cycle) becomes the limit
-    assert cost(C("DMA_LOAD", rows=1, row_bytes=32768), hw, MEASURED.with_(dma_masters=2))[0] == LAT + 1024 + 1
-    # PYNQ-Z2: 64-bit HP port, 150 MHz, 400 ns: 8 B/cycle, 60 cycles latency
-    occ4, _, _ = cost(C("DMA_LOAD", rows=1, row_bytes=4096), PYNQ_Z2)
-    assert occ4 == 60 + 4096 // 8 + 1
+    assert cost(C("DMA_LOAD", rows=1, row_bytes=32, ddr_addr=8), hw, pre)[0] == LAT + 3 + 1
+    occ3, lat3, _ = cost(C("DMA_STORE", rows=1, row_bytes=32768), hw)
+    assert (occ3, lat3) == (2048 + 1 + gap, LAT)
+    # both engines streaming: each still gets its 16 B/cycle (2 x 16 = the 32 B/cycle DDR)
+    assert cost(C("DMA_LOAD", rows=1, row_bytes=32768), hw, share=2)[0] == 2048 + 1 + gap
+    # PYNQ-Z2: 64-bit HP port, 150 MHz, 400 ns: 8 B/cycle, 60 cycles latency; 1.5 GB/s DDR = 10 B/cycle
+    # is split when both engines stream (5 B/cycle each)
+    assert cost(C("DMA_LOAD", rows=1, row_bytes=4096), PYNQ_Z2, timing_for(PYNQ_Z2).with_(**PRE_SG10A))[0] == 60 + 4096 // 8 + 1
+    assert cost(C("DMA_LOAD", rows=1, row_bytes=4000), PYNQ_Z2, share=2)[0] == 4000 // 5 + 1 + gap
+
+
+def test_cyclemodel_two_dma_channels():
+    """SG10a: DMA commands run on engine chan & 1 and overlap; a DMA SIGNAL fires after the later of
+    the two; a DMA_STORE is a fence (starts after both, nothing starts before it is done)."""
+    hw = KV260
+    ld = lambda ch, n: C("DMA_LOAD", chan=ch, sp_buf=1, rows=1, row_bytes=n)
+    t = simulate([ld(0, 32768), ld(1, 1024), C("SIGNAL", queue=0, sem=0), C("WAIT", queue=1, sem=0, count=1),
+                  C("GEMM", M=1, N=32, K=32), C("END")], hw, trace=True, tm=MEASURED.with_(fetch_over_axi=False))
+    tr = {i: (s, e) for i, q, s, e in t.trace}
+    assert tr[1][0] < tr[0][1] and tr[1][1] < tr[0][1]           # ch1 overlaps and finishes first
+    assert tr[4][0] >= tr[0][1]                                   # SIGNAL covers channel 0 too
+    st = C("DMA_STORE", chan=1, sp_buf=1, rows=1, row_bytes=1024)
+    t2 = simulate([ld(0, 32768), st, ld(0, 1024), C("END")], hw, trace=True,
+                  tm=MEASURED.with_(fetch_over_axi=False))
+    tr2 = {i: (s, e) for i, q, s, e in t2.trace}
+    assert tr2[1][0] >= tr2[0][1] and tr2[2][0] >= tr2[1][1]
+    # one engine (pre-SG10a): everything serial
+    t3 = simulate([ld(0, 32768), ld(1, 32768), C("END")], hw, tm=MEASURED.with_(fetch_over_axi=False, **PRE_SG10A))
+    t4 = simulate([ld(0, 32768), ld(1, 32768), C("END")], hw, tm=MEASURED.with_(fetch_over_axi=False))
+    assert t4.cycles < 0.6 * t3.cycles
 
 
 def test_cyclemodel_gemm_cost_measured():
@@ -139,15 +165,16 @@ def test_cyclemodel_queues_overlap_and_semaphores():
 
 
 def test_cyclemodel_signal_blocks_queue_until_completion():
-    """SIGNAL at a queue head blocks that queue until every earlier command completed (incl. the
-    GEMM's 2N+4 latency), so a GEMM after it starts late; the what-if non-blocking SIGNAL does not."""
+    """Pre-SG10a: SIGNAL at a queue head blocked that queue until every earlier command completed
+    (incl. the GEMM's 2N+4 latency), so a GEMM after it started late. As built (SG10a) the SIGNAL is
+    carried on done: the next GEMM starts right after the first one's occupancy."""
     hw = KV260
     g = C("GEMM", M=100, N=32, K=32)
     cmds = [g, C("SIGNAL", queue=1, sem=3), g, C("WAIT", queue=2, sem=3, count=1), C("END")]
-    t = simulate(cmds, hw, trace=True)
+    t = simulate(cmds, hw, trace=True, tm=MEASURED.with_(signal_blocks=True))
     s = {i: st for i, q, st, e in t.trace}
     assert s[2] - s[0] >= 100 + 68
-    t2 = simulate(cmds, hw, trace=True, tm=MEASURED.with_(signal_blocks=False))
+    t2 = simulate(cmds, hw, trace=True)
     s2 = {i: st for i, q, st, e in t2.trace}
     assert s2[2] - s2[0] == 100
 
@@ -197,16 +224,20 @@ def shk():
 
 
 def test_cyclemodel_shakespeare_measured(shk):
-    """As built (wave 2 RTL + coalesced compiler DMAs), KV260 INT8 decode is bound by the single
-    128-bit DMA master (16 B/cycle = 4 GB/s at 250 MHz), half the 8 GB/s board assumption: the
-    critical path is almost all weight DMA. Prefill is mostly array bound: with the VEC engine's
+    """As built (SG10a: two 128-bit DMA masters, pipelined, carried SIGNALs; coalesced compiler DMAs),
+    KV260 INT8 decode streams weights at up to 2 x 16 B/cycle = the 8 GB/s board DDR: > 1.6x the single
+    pipelined-less master (one master caps at 16 B/cycle = 4 GB/s), > 75 % of the DDR weight bound; weight
+    DMA is still the largest critical-path class. Prefill is mostly array bound: with the VEC engine's
     64-byte ports (SG10b; 16-byte ports gave ~65 %, AUDIT-1 A1-01) the array is ~78 % busy, 14.7 ms for
     the 256-token prompt. Softmax (int32 scores, still 16 per cycle at L = 64) is the next VEC term."""
     assert shk["fits"]
-    port_bound = 16 * KV260.clock_hz / SHAKESPEARE.weight_bytes
-    assert 0.85 * port_bound < shk["decode_tok_s"] <= port_bound
-    assert shk["decode_tok_s"] < 0.55 * shk["weight_bound_tok_s"]
-    assert shk["decode_critical"]["dma weights"] > 0.85 * shk["decode_cycles"]
+    one_port = 16 * KV260.clock_hz / SHAKESPEARE.weight_bytes
+    assert 1.6 * one_port < shk["decode_tok_s"] <= shk["weight_bound_tok_s"]
+    assert shk["decode_tok_s"] > 0.75 * shk["weight_bound_tok_s"]
+    pre = estimate(SHAKESPEARE, KV260, prefill_len=0, n_pos=3, tm=MEASURED.with_(**PRE_SG10A))
+    assert 0.85 * one_port < pre["decode_tok_s"] <= one_port
+    crit = shk["decode_critical"]
+    assert crit["dma weights"] == max(crit.values()) and crit["dma weights"] > 0.5 * shk["decode_cycles"]
     assert shk["prefill_critical"]["gemm linear"] > 0.6 * shk["prefill_cycles"]
     assert 0.75 < shk["prefill_array_util"] < 0.85
     assert 14.0 < shk["prefill_ms"] < 15.5
@@ -227,21 +258,19 @@ def test_cyclemodel_vec_port_widening_restores_prefill(shk):
 
 
 def test_cyclemodel_fixes_order(shk):
-    """The ADR-003 bottleneck ranking with the coalesced compiler: a second DMA master first (~1.9x
-    decode), DMA pipelining (+ SIGNAL on done) a few %, the SFU second row buffer only in prefill, and
-    the 2-row array weight port pays off for INT4 once the DMA is doubled."""
+    """The ADR-003 bottleneck ranking after SG10a (second DMA master and DMA pipelining built): the SFU
+    second row buffer helps only prefill, coalescing is already done by the compiler, and the 2-row array
+    weight port is now the INT4 decode fix (INT4 decode is array-bound once the DMA is doubled)."""
     tm = timing_for(KV260)
     est = lambda cfg, **kw: estimate(cfg, KV260, prefill_len=0, n_pos=3, tm=tm.with_(**kw))["decode_tok_s"]
-    two = FIXES["second DMA master (2 HP ports)"]
     base = shk["decode_tok_s"]
-    assert est(SHAKESPEARE, **two) > 1.6 * base
-    assert 1.0 < est(SHAKESPEARE, **FIXES["DMA command pipelining"]) / base < 1.15
+    assert "second DMA master (2 HP ports)" not in FIXES and "DMA command pipelining" not in FIXES
+    assert est(SHAKESPEARE, **PRE_SG10A) < 0.6 * base
     assert abs(est(SHAKESPEARE, **FIXES["SFU second row buffer"]) / base - 1) < 0.01
     # coalescing is already done by the compiler: the what-if changes nothing
     assert est(SHAKESPEARE, **FIXES["coalesce contiguous DMA rows"]) == base
     w4 = SHAKESPEARE.with_(wbits=4)
-    both = dict(two, **FIXES["2-row array weight port"])
-    assert est(w4, **both) > 1.5 * est(w4, **two)
+    assert est(w4, **FIXES["2-row array weight port"]) > 1.5 * est(w4)
     sfu = estimate(SHAKESPEARE, KV260, n_pos=3, tm=tm.with_(**FIXES["SFU second row buffer"]))
     assert sfu["prefill_ms"] < shk["prefill_ms"]
 

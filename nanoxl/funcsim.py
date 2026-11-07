@@ -415,14 +415,26 @@ SEM_STREAM_LIMIT = SEM_MAX + QUEUE_DEPTH
 def check_hazards(cmds, ddr_base=0, sem_limit=SEM_STREAM_LIMIT):
     """Prove that every pair of conflicting accesses (RAW/WAR/WAW on any 16-byte block of any buffer
     or DDR) in ``cmds`` is ordered by happens-before: same-queue program order plus SIGNAL -> WAIT
-    edges (counting semaphores) plus END/IRQ barriers. Also checks that each WAIT's signals appear
+    edges (counting semaphores) plus END/IRQ barriers.
+
+    The DMA queue has two engines (ADR-005): a DMA command runs on channel ``chan & 1``, and only
+    commands of the same channel are ordered by program order. A DMA WAIT orders every later DMA
+    command (the queue issues in order); a DMA SIGNAL covers every earlier DMA command of both
+    channels; a DMA_STORE is a fence (it runs after every earlier DMA command and before every later
+    one, on both channels). So two LOADs on different channels with no fence or semaphore path
+    between them are unordered, and writing the same scratchpad bytes is rejected as a race.
+
+    Also checks that each WAIT's signals appear
     earlier in the stream (the dispatch-deadlock-freedom invariant), and that no semaphore ever has more
     than ``sem_limit`` = 255 + 8 SIGNALs outstanding ahead of their WAITs in stream order: past that the
     counter holds 255, the producer queue fills with stalled SIGNALs, the in-order dispatcher blocks and
     the consuming WAIT is never dispatched (deadlock, docs/control.md §1 "Stream limit").
     Returns summary stats (incl. ``max_outstanding_sem``)."""
-    nq = 3
-    vc_q = [np.zeros(nq, np.int64) for _ in range(nq)]  # current vector clock of each queue
+    nq = 4         # agents: 0 DMA channel 0, 1 ARRAY, 2 VEC, 3 DMA channel 1
+    vc_q = [np.zeros(nq, np.int64) for _ in range(nq)]  # current vector clock of each agent
+
+    def agents(q):
+        return (0, 3) if q == isa.Q_DMA else (q,)
     signals = {}   # sem -> list of vector clocks at signal time (stream order)
     consumed = {}
     own = []       # per work command: (queue, own seq number)
@@ -433,7 +445,7 @@ def check_hazards(cmds, ddr_base=0, sem_limit=SEM_STREAM_LIMIT):
         q = c.queue
         if c.op == "SIGNAL":
             lst = signals.setdefault(c["sem"], [])
-            lst.append(vc_q[q].copy())
+            lst.append(np.max(np.stack([vc_q[a] for a in agents(q)]), axis=0))
             out = len(lst) - consumed.get(c["sem"], 0)
             if out > sem_limit:
                 raise RaceError(f"semaphore {c['sem']}: {out} SIGNALs outstanding ahead of their WAITs "
@@ -447,7 +459,8 @@ def check_hazards(cmds, ddr_base=0, sem_limit=SEM_STREAM_LIMIT):
             if len(got) < n0 + k:
                 raise RaceError(f"WAIT on sem {s} needs signal #{n0 + k} but only {len(got)} precede it")
             for v in got[n0:n0 + k]:
-                vc_q[q] = np.maximum(vc_q[q], v)
+                for a in agents(q):
+                    vc_q[a] = np.maximum(vc_q[a], v)
             consumed[s] = n0 + k
             continue
         if c.op in ("END", "IRQ"):
@@ -455,7 +468,16 @@ def check_hazards(cmds, ddr_base=0, sem_limit=SEM_STREAM_LIMIT):
             for i in range(nq):
                 vc_q[i] = j.copy()
             continue
-        vc_q[q][q] += 1
+        if q == isa.Q_DMA:
+            a = 3 if c["chan"] & 1 else 0
+            if c.op == "DMA_STORE":       # fence: after everything before it on both channels
+                vc_q[a] = np.maximum(vc_q[0], vc_q[3])
+        else:
+            a = q
+        vc_q[a][a] += 1
+        if q == isa.Q_DMA and c.op == "DMA_STORE":   # ... and before everything after it
+            vc_q[3 - a] = vc_q[a].copy()
+        q = a
         cid = len(own)
         own.append((q, vc_q[q][q]))
         vc = vc_q[q]

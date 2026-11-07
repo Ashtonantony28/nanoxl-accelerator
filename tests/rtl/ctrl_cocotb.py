@@ -1,11 +1,16 @@
 """cocotb tests for rtl/ctrl_top.sv: the whole control plane (CSRs over AXI4-Lite, ring fetch over
 AXI4, dispatch into three in-order queues, WAIT/SIGNAL semaphores, END/IRQ barriers, the real
-DMA engine against cocotbext-axi AxiRam, ARRAY/VEC engine stubs with random latency).
+DMA engines (two channels, SG10a / ADR-005) against cocotbext-axi AxiRams on one shared memory,
+ARRAY/VEC engine stubs with random latency).
 
 Random command streams obey the compiler invariants of docs/isa.md §2 and are checked against a
 Python scoreboard: per-queue order and words, every SIGNAL->WAIT dependency (no engine command
 starts before the commands its WAITs depend on are done), barriers, final semaphore values,
-DDR/scratchpad contents after the DMA commands, and the perf counters.
+DDR/scratchpad contents after the DMA commands, and the perf counters. DMA commands go to channel
+chan[0] and complete out of order across channels: a SIGNAL's dependency bound is the latest done of
+every earlier DMA command on either channel. Random streams keep the cross-channel hazard rule of
+ADR-005 (no two unordered LOADs on different channels write the same scratchpad bytes; stores are
+fences), so the in-order memory reference stays exact.
 Env: CTRL_NCMD (stream length of the long random test).
 """
 import mmap
@@ -19,8 +24,8 @@ from cocotb.triggers import RisingEdge
 from cocotbext.axi import AxiBus, AxiLiteBus, AxiLiteMaster, AxiRam, AxiReadBus
 from cocotbext.axi.axi_ram import AxiRamRead
 
-from ctrl_common_cocotb import (AxiMonitor, Bench, SpadModel, dma_apply, rand_legal, rand_pause,
-                                set_axi_pauses, word_int)
+from ctrl_common_cocotb import (AxiMonitor, Bench, SpadModel, add_read_latency, dma_apply, rand_legal,
+                                rand_pause, set_axi_pauses, word_int)
 from nanoxl import isa
 
 NCMD = int(os.environ.get("CTRL_NCMD", "300"))
@@ -81,22 +86,42 @@ class EngineStub:
 
 
 class ProcMonitor:
-    """Watches the DMA engine's command port and the barrier pulses inside ctrl_top."""
+    """Watches both DMA engines' command ports and the barrier pulses inside ctrl_top. `acc` is the
+    DMA queue's issue order (one issue per cycle, so cycles are strictly increasing); `dones[j]` is
+    the done cycle of the j-th issued DMA command (matched per channel, each channel completes in
+    order), so it is not monotonic across channels."""
 
     def __init__(self, dut):
         self.d = dut
         self.cycle = 0
-        self.acc, self.dones, self.irqs, self.ends = [], [], [], []
+        self.acc, self.irqs, self.ends = [], [], []
+        self.ch = []                       # channel of each issued DMA command
+        self.ch_done = ([], [])            # done cycles per channel
+        self.both_busy = 0                 # cycles with both DMA engines busy
 
     def drive(self):
         self.cycle += 1
 
+    @property
+    def dones(self):
+        k, out = [0, 0], []
+        for c in self.ch:
+            if k[c] >= len(self.ch_done[c]):
+                break
+            out.append(self.ch_done[c][k[c]])
+            k[c] += 1
+        return out
+
     def sample(self):
-        d = self.d.u_dma
-        if int(d.cmd_valid.value) and int(d.cmd_ready.value):
-            self.acc.append((self.cycle, int(d.cmd_word.value)))
-        if int(d.done.value):
-            self.dones.append(self.cycle)
+        busy = 0
+        for c, d in enumerate((self.d.u_dma0, self.d.u_dma1)):
+            if int(d.cmd_valid.value) and int(d.cmd_ready.value):
+                self.acc.append((self.cycle, int(d.cmd_word.value)))
+                self.ch.append(c)
+            if int(d.done.value):
+                self.ch_done[c].append(self.cycle)
+            busy += int(d.busy.value)
+        self.both_busy += busy == 2
         p = self.d.u_proc
         if int(p.irq_pulse.value):
             self.irqs.append(self.cycle)
@@ -107,35 +132,44 @@ class ProcMonitor:
 # ----------------------------------------------------------------------------- bench
 class TB:
     def __init__(self, dut, seed, p_axi=0.25, p_sp=0.7, eng_p=0.8, eng_lat=(1, 8), eng_cap=4,
-                 ring_size=48):
+                 ring_size=48, lat=0):
         self.dut = dut
         self.rng = random.Random(seed)
         self.bench = Bench(dut)
-        for n in ("md_axi", "mf_axi", "s_axil"):
+        for n in ("md_axi", "md1_axi", "mf_axi", "s_axil"):
             logging.getLogger(f"cocotb.{dut._name}.{n}").setLevel(logging.ERROR)
         self.mem = mmap.mmap(-1, 1 << 32)
         self.ram = AxiRam(AxiBus.from_prefix(dut, "md_axi"), dut.clk, dut.rst_n,
                           reset_active_level=False, size=1 << 32, mem=self.mem)
+        self.ram1 = AxiRam(AxiBus.from_prefix(dut, "md1_axi"), dut.clk, dut.rst_n,
+                           reset_active_level=False, size=1 << 32, mem=self.mem)
+        for r in (self.ram, self.ram1):
+            add_read_latency(r.read_if, lat, 10)
         self.fram = AxiRamRead(AxiReadBus.from_prefix(dut, "mf_axi"), dut.clk, dut.rst_n,
                                reset_active_level=False, size=1 << 32, mem=self.mem)
         if p_axi:
             set_axi_pauses(self.ram, self.rng, p_axi)
+            set_axi_pauses(self.ram1, self.rng, p_axi)
             set_axi_pauses(self.fram, self.rng, p_axi, read_only=True)
         self.axil = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axil"), dut.clk, dut.rst_n,
                                   reset_active_level=False)
         for ch in (self.axil.write_if.aw_channel, self.axil.write_if.w_channel,
                    self.axil.read_if.ar_channel):
             ch.set_pause_generator(rand_pause(random.Random(self.rng.random()), 0.3))
-        for lg in (self.ram.write_if.log, self.ram.read_if.log, self.fram.log,
+        for lg in (self.ram.write_if.log, self.ram.read_if.log, self.ram1.write_if.log, self.ram1.read_if.log,
+                   self.fram.log,
                    self.axil.write_if.log, self.axil.read_if.log):
             lg.setLevel(logging.WARNING)
         self.sp = SpadModel(dut, self.rng, p_ready=p_sp)
+        self.sp1 = SpadModel(dut, self.rng, p_ready=p_sp, prefix="sp1_")
+        self.sp1.mem = self.sp.mem         # both channels write the same scratchpad
         self.arr = EngineStub(dut, "arr", self.rng, eng_p, eng_lat, eng_cap)
         self.vec = EngineStub(dut, "vec", self.rng, eng_p, eng_lat, eng_cap)
         self.mon = ProcMonitor(dut)
         self.fmon = AxiMonitor(dut, "mf_axi_", max_beats=8, write=False)
         self.dmon = AxiMonitor(dut, "md_axi_", max_beats=256)
-        self.bench.agents = [self.sp, self.arr, self.vec, self.mon, self.fmon, self.dmon]
+        self.dmon1 = AxiMonitor(dut, "md1_axi_", max_beats=256)
+        self.bench.agents = [self.sp, self.sp1, self.arr, self.vec, self.mon, self.fmon, self.dmon, self.dmon1]
         self.ring_size = ring_size
         self.tail = 0
         self.ddr = bytearray(self.rng.randbytes(WIN))
@@ -164,8 +198,11 @@ class TB:
         self.bench.set("rst_n", 0)
         await self.cycles(5)
         self.sp.reset()
+        self.sp1.reset()
         self.arr.reset()
         self.vec.reset()
+        self.sp.reset()          # no line read sampled in the first reset cycle returns after it
+        self.sp1.reset()
         self.bench.set("rst_n", 1)
         await self.cycles(3)
         self.tail = 0
@@ -262,9 +299,57 @@ def engine_cmd(rng, q):
     return rand_legal(rng, rng.choice(ops))
 
 
+def sp_rows(c):
+    """(buf, [(lo, hi), ...]) scratchpad byte ranges a DMA command touches (2^21 wrap split)."""
+    f = c.f
+    ss = (f["sp_stride"] * 16) or f["row_bytes"]
+    out = []
+    for r in range(f["rows"]):
+        lo = (f["sp_addr"] + r * ss) % (1 << 21)
+        hi = lo + f["row_bytes"]
+        out += [(lo, min(hi, 1 << 21))] + ([(0, hi - (1 << 21))] if hi > 1 << 21 else [])
+    return f["sp_buf"], out
+
+
+class ChanHazard:
+    """ADR-005 rule for streams the in-order reference can model: LOADs on different DMA channels
+    that are not ordered (no STORE fence or barrier between them) must not write the same
+    scratchpad bytes. `fix` moves a conflicting LOAD to the other channel or to another address."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.w = ([], [])      # per channel: (buf, lo, hi) written by LOADs since the last fence
+
+    def _hits(self, ch, c):
+        b, rows = sp_rows(c)
+        return any(bb == b and lo < h and l < hi for bb, l, h in self.w[ch] for lo, hi in rows)
+
+    def fix(self, rng, c):
+        if c.op == "DMA_STORE":
+            self.reset()
+            return c
+        for _ in range(50):
+            ch = c.f["chan"] & 1
+            if not self._hits(1 - ch, c):
+                break
+            if not self._hits(ch, c):
+                c = isa.Cmd(c.op, dict(c.f, chan=c.f["chan"] ^ 1))
+                continue
+            c = isa.Cmd(c.op, dict(c.f, sp_addr=rng.randrange(1 << 21)))
+        else:
+            raise RuntimeError("no hazard-free placement")
+        b, rows = sp_rows(c)
+        self.w[c.f["chan"] & 1].extend((b, lo, hi) for lo, hi in rows)
+        return c
+
+
 def gen_stream(rng, n, n_sems=10, p_irq=0.02, end=True):
     """Random stream obeying docs/isa.md §2: each semaphore has one producer and one consumer
-    queue, and every WAIT consumes only SIGNALs that appear earlier in the stream."""
+    queue, and every WAIT consumes only SIGNALs that appear earlier in the stream; DMA commands keep
+    the cross-channel scratchpad hazard rule (ChanHazard)."""
+    hz = ChanHazard()
     sems = rng.sample(range(32), n_sems)
     pc = {s: tuple(rng.sample(range(3), 2)) for s in sems}
     pending = {s: 0 for s in sems}
@@ -285,8 +370,10 @@ def gen_stream(rng, n, n_sems=10, p_irq=0.02, end=True):
             pending[s] -= k
         elif u < 0.36 + p_irq:
             out.append(isa.C("IRQ", code=rng.randrange(1 << 16)))
+            hz.reset()
         else:
-            out.append(engine_cmd(rng, rng.randrange(3)))
+            c = engine_cmd(rng, rng.randrange(3))
+            out.append(hz.fix(rng, c) if c.op.startswith("DMA") else c)
     for s in sems:            # drain every semaphore so all counters end at zero
         if pending[s]:
             out.append(isa.C("WAIT", queue=pc[s][1], sem=s, count=pending[s]))
@@ -327,7 +414,7 @@ def check_stream(tb, stream, mark=((0, 0, 0), (0, 0))):
         for j, si in enumerate(eng[q]):
             assert acc[q][j][1] == word_int(stream[si]), f"{Q_NAMES[q]} command {j} out of order"
         for pos, (p, k) in req[q]:
-            bound = dones[p][k - 1]
+            bound = max(dones[p][:k])          # every earlier command of p, on every DMA channel
             for j in range(pos, len(eng[q])):
                 assert acc[q][j][0] > bound, (f"{Q_NAMES[q]} cmd {j} started at {acc[q][j][0]} before "
                                               f"{Q_NAMES[p]} cmd {k - 1} done at {bound}")
@@ -340,7 +427,7 @@ def check_stream(tb, stream, mark=((0, 0, 0), (0, 0))):
             ne += 1
         for q in range(3):
             if before[q]:
-                assert dones[q][before[q] - 1] < t, f"{kind} before {Q_NAMES[q]} drained"
+                assert max(dones[q][:before[q]]) < t, f"{kind} before {Q_NAMES[q]} drained"
             if before[q] < len(acc[q]):
                 assert acc[q][before[q]][0] > t, f"{Q_NAMES[q]} started before {kind} executed"
     assert ni == len(irqs) and ne == len(ends)
@@ -670,3 +757,76 @@ async def ctrl_reset_mid_stream(dut):
         assert not st & ST_HALTED
         check_stream(tb, stream, m)
         tb.check_memory()
+
+
+@cocotb.test()
+async def ctrl_dual_dma(dut):
+    """SG10a (ADR-005), 60-cycle read latency on both DMA masters:
+    (1) a long LOAD on channel 0 then a short LOAD on channel 1: channel 1 finishes first (the
+        channels run concurrently), and the DMA->ARRAY SIGNAL behind both releases the ARRAY WAIT
+        only after the *later* (channel 0) done: SIGNAL ordering across channels;
+    (2) the same with the long LOAD on channel 1 (no channel is privileged);
+    (3) STORE fence: LOAD ch0 into a scratchpad region, STORE ch1 of that region to DDR (sees the
+        loaded bytes), LOAD ch0 of that DDR (sees the stored bytes); the STORE is issued only after
+        every earlier DMA is done and nothing issues while it runs;
+    (4) SIGNAL carried on done: a DMA SIGNAL does not block the DMA queue: a LOAD behind it is issued
+        before the SIGNAL fires;
+    and the memory, PERF_BYTES and PERF_RETIRED of the whole program."""
+    tb = TB(dut, 120, p_axi=0.0, p_sp=1.0, eng_p=1.0, eng_lat=(1, 2), lat=60)
+    await tb.start()
+    rng = random.Random(121)
+    B = WIN_BASE
+    gemm = rand_legal(rng, "GEMM")
+    stream = []
+    for k, (long_ch, short_ch) in enumerate(((0, 1), (1, 0))):
+        stream += [isa.C("DMA_LOAD", chan=long_ch, sp_buf=1, sp_addr=0x10000 * k, ddr_addr=B + 0x8000 * k,
+                         rows=1, row_bytes=8192),
+                   isa.C("DMA_LOAD", chan=short_ch, sp_buf=0, sp_addr=0x4000 + 0x1000 * k, ddr_addr=B + 0x30000,
+                         rows=1, row_bytes=64),
+                   isa.C("SIGNAL", queue=isa.Q_DMA, sem=4),
+                   isa.C("WAIT", queue=isa.Q_ARR, sem=4, count=1), gemm]
+    # (3) fence: ch0 load -> ch1 store of the same bytes -> ch0 load back
+    stream += [isa.C("DMA_LOAD", chan=0, sp_buf=2, sp_addr=0x2003, ddr_addr=B + 0x10005, rows=2, row_bytes=3000,
+                     ddr_stride=3100),
+               isa.C("DMA_STORE", chan=1, sp_buf=2, sp_addr=0x2003, ddr_addr=B + 0x20009, rows=2, row_bytes=3000,
+                     ddr_stride=3100),
+               isa.C("DMA_LOAD", chan=0, sp_buf=4, sp_addr=0x100, ddr_addr=B + 0x20009, rows=1, row_bytes=6100)]
+    # (4) a SIGNAL that has to wait for a long load, with a load queued behind it
+    stream += [isa.C("DMA_LOAD", chan=1, sp_buf=3, sp_addr=0x0, ddr_addr=B + 0x34000, rows=1, row_bytes=8192),
+               isa.C("SIGNAL", queue=isa.Q_DMA, sem=5),
+               isa.C("DMA_LOAD", chan=0, sp_buf=3, sp_addr=0x4000, ddr_addr=B + 0x3C000, rows=1, row_bytes=256),
+               isa.C("WAIT", queue=isa.Q_VEC, sem=5, count=1), rand_legal(rng, "VEC"), isa.C("END")]
+    for c in stream:
+        if c.op.startswith("DMA"):
+            tb.dma_ref(c)
+    sig_fire = []
+
+    async def watch():
+        q = dut.u_proc.u_qd
+        while True:
+            await RisingEdge(dut.clk)
+            if int(q.sig_req.value) and int(q.sig_gnt.value):
+                sig_fire.append(tb.mon.cycle)
+    w = cocotb.start_soon(watch())
+    await tb.submit(stream, chunk_max=40)
+    st = await tb.wait_idle(ends=1)
+    w.cancel()
+    assert not st & ST_HALTED
+    check_stream(tb, stream)
+    tb.check_memory()
+    acc, dones, ch = tb.mon.acc, tb.mon.dones, tb.mon.ch
+    assert ch[:4] == [0, 1, 1, 0], ch
+    for k in range(2):
+        j = 2 * k
+        assert dones[j + 1] < dones[j], f"case {k + 1}: the short load did not finish first {dones[j:j + 2]}"
+        ga = tb.arr.acc[k][0]
+        assert ga > dones[j], f"case {k + 1}: GEMM at {ga} before the long load's done at {dones[j]}"
+    # (3) the store waits for the load before it and blocks the load after it
+    assert acc[5][0] > dones[4] and acc[6][0] > dones[5], (acc[4:7], dones[4:7])
+    # (4) the load behind the SIGNAL issues before the SIGNAL fires (the SIGNAL is carried)
+    assert acc[8][0] < sig_fire[-1] and sig_fire[-1] > dones[7], (acc[8][0], sig_fire, dones[7])
+    assert tb.mon.both_busy > 0
+    lo, hi = await tb.rd("PERF_BYTES_LO"), await tb.rd("PERF_BYTES_HI")
+    assert lo | hi << 32 == tb.dma_bytes
+    assert await tb.rd("PERF_RETIRED") == len(stream)
+    dut._log.info("dual DMA: dones %s, both engines busy %d cycles", dones, tb.mon.both_busy)

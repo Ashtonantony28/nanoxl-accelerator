@@ -121,7 +121,7 @@ class TB:
         self.sat = [0] * 5        # funcsim cumulative, by category
         self.sat_base = [0] * 5   # RTL counter value when the bench's count started
         self.wrdy = 0
-        self.check_writes = True
+        self.checking = True
         self.done_cycles = []
 
     async def start(self):
@@ -190,13 +190,19 @@ class TB:
         self.expect.append(dict(cmd=c, rects=rects, allowed=allowed, sat=list(self.sat), note=note))
         self.cmdq.append(word(c))
 
-    def add_raw(self, w, err_expected=True):
-        """Queue an illegal word: the RTL must skip it (no writes) and still pulse done."""
-        self.expect.append(dict(cmd=None, rects=[], allowed={}, sat=list(self.sat), note="illegal"))
+    def add_raw(self, w, unchecked=False):
+        """Queue an illegal word: the RTL must skip it (no writes, counters unchanged) and still
+        pulse done. ``unchecked``: anything may be written (an error found mid-command)."""
+        self.expect.append(dict(cmd=None, rects=[], allowed=None if unchecked else {}, sat=list(self.sat),
+                                note="illegal"))
         self.cmdq.append(w)
 
     def check_done(self):
+        assert self.expect, "done pulse without an outstanding command"
         e = self.expect.popleft()
+        if e["allowed"] is None:
+            self.writes = []
+            return
         for (b, ln, strb) in self.writes:
             ok = e["allowed"].get((b, ln), 0)
             assert strb & ~ok == 0, (f"cmd {e['cmd']}: write outside its destination: "
@@ -251,7 +257,8 @@ class TB:
         if d.done.value == 1:
             self.dones += 1
             self.done_cycles.append(self.cyc)
-            self.check_done()
+            if self.checking:
+                self.check_done()
 
     async def drain(self, max_cycles=3_000_000):
         """Run until every queued command is done."""

@@ -362,3 +362,252 @@ async def vec_seq_random(dut):
 async def vec_seq_random_fast_ports(dut):
     """Same with always-ready ports and back-to-back commands (pipelined issue)."""
     await run_random(dut, seed=12, n_cmds=max(10, N_CMDS // 2), p_ar=1.0, p_w=1.0, p_cmd=1.0, lat=2)
+
+
+# ------------------------------------------------------------------ compiled tiny model
+async def run_tiny(dut, steps, snoop="dma", seed=21, **tbkw):
+    """Every VEC-queue command the compiler emits for the tiny W8A8 bundle, for the given steps
+    [(pos, n)] (prefill + decode), executed on the RTL with all other commands (DMA, GEMM) done
+    by funcsim in stream order. Consecutive VEC commands run as one pipelined batch; before a
+    batch the scratchpads are synced from funcsim. ``snoop``: "dma" reports every PBUF line a
+    DMA_LOAD wrote (what the hardware sees), "changed" only lines whose bytes changed (a
+    compiler that keeps parameter blocks resident)."""
+    from nanoxl.funcsim import HostRunner
+    from nanoxl.hwconfig import KV260
+    A, meta = bundle()
+    runner = HostRunner(A, meta, KV260, name="w8a8")
+    tb = TB(dut, seed=seed, **tbkw)
+    tb.fs = runner.sim
+    tb.mem = {b: runner.sim.mem[b].copy() for b in tb.mem}
+    await tb.start()
+    rng = random.Random(seed)
+    counts = {}
+    for pos, n in steps:
+        prog = runner.comp.compile_step([(pos, n)])
+        toks = [rng.randrange(runner.cfg.vocab) for _ in range(n)]
+        runner.sim.write_input(prog, "x", runner.embed(toks, pos))
+        batch, dma_lines = False, []
+        for c in prog.cmds:
+            if c.queue == isa.Q_VEC and c.op not in ("WAIT", "SIGNAL"):
+                if not batch:
+                    tb.sync_to_rtl("changed" if snoop == "changed" else dma_lines)
+                    dma_lines, batch = [], True
+                tb.add(c, note=c.note)
+                counts[c.op] = counts.get(c.op, 0) + 1
+                continue
+            if batch and any(a[0] in BUFS_SP and a[1] for a in accesses(c)):
+                await tb.drain()
+                tb.compare_all()
+                batch = False
+            if c.op == "DMA_LOAD" and c["sp_buf"] == isa.PBUF:
+                a0, nb = c["sp_addr"], c["rows"] * c["row_bytes"]
+                dma_lines += list(range(a0 // LINE, (a0 + nb - 1) // LINE + 1))
+            runner.sim.step(c)
+        if batch:
+            await tb.drain()
+            tb.compare_all()
+        runner.pos[0] += n
+    golden_sat = runner.sim.sat_count
+    dut._log.info(f"tiny {steps}: VEC-queue commands {counts}; {tb.cyc} cycles; loader hits "
+                  f"{u(dut.st_hits)} misses {u(dut.st_misses)} lines {u(dut.st_lines)}; sat {tb.sat}; "
+                  f"funcsim per-op sat {dict((k, v) for k, v in golden_sat.items() if v)}")
+    assert u(dut.err) == 0
+    return tb
+
+
+BUFS_SP = (isa.ABUF, isa.WBUF, isa.ACC, isa.PBUF, isa.KVBUF)
+from nanoxl.funcsim import accesses  # noqa: E402
+
+
+@cocotb.test()
+async def vec_seq_tiny_forward(dut):
+    """Tiny W8A8: prefill of TINY_T tokens + one decode step, every VEC-queue command."""
+    t = int(os.environ.get("TINY_T", "6"))
+    await run_tiny(dut, [(0, t), (t, 1)], snoop=os.environ.get("TINY_SNOOP", "dma"))
+
+
+# ------------------------------------------------------------------ errors, clear, residency
+@cocotb.test()
+async def vec_seq_errors(dut):
+    """Illegal commands are skipped (no writes), still pulse done, raise err with the first cause;
+    clr clears it."""
+    tb = TB(dut, seed=7)
+    await tb.start()
+    g = Gen(tb, random.Random(8))
+
+    async def expect_err(w, code, unchecked=False):
+        tb.add_raw(w, unchecked)
+        await tb.drain()
+        assert tb.err() == (1, code), (tb.err(), code)
+        await tb.clear()
+        assert tb.err() == (0, 0)
+
+    tb.clear = lambda: clear(tb)
+    # LN / SOFTMAX before the tables are loaded
+    g.setup()
+    tb.cmdq.clear()
+    tb.expect.clear()
+    tb.fs.sfu.clear()
+    c = g.ln()
+    await expect_err(word(c), 6)
+    await expect_err(word(isa.C("GEMM", M=1, N=16, K=16)), 1)
+    await expect_err(word(isa.C("VEC", vop=7, len=4, imm=40)), 3)
+    await expect_err(word(isa.C("VEC", vop=8, len=4, imm=-1)), 3)
+    await expect_err(word(isa.C("KV_APPEND", heads=1, dh=24, ctx=8, rows=1)), 7)
+    await expect_err(word(isa.C("KV_APPEND", heads=1, dh=16, ctx=8, rows=4, pos=5)), 7)
+    await expect_err(int.from_bytes(isa.encode(isa.C("VEC", vop=1, len=4)), "little") | (9 << 6), 2)
+    await expect_err(word(isa.C("LUT_LOAD", table=0)) | (3 << 6), 2)
+    for t in range(3):
+        tb.add(isa.C("LUT_LOAD", table=t, src_addr=P_LUT + 512 * t))
+    await tb.drain()
+    sm = g.softmax()
+    w0 = word(sm) & ~(1 << 6)                     # first = 0
+    await expect_err(w0, 4)
+    sm.f.update(causal=1, diag=-1)
+    await expect_err(int.from_bytes(isa.encode(sm), "little"), 4)
+    big = isa.C("LN", in16=1, rows=1, cols=D_MAX + 16, src_stride=60, dst_stride=30)
+    await expect_err(word(big), 5)
+    # a REQUANT record with ls != 0: detected while loading, the command still completes
+    rq = g.requant()
+    tb.write_mem(isa.PBUF, rq["param_addr"], rec_bytes([[1, 1 << 30, 3, 2]]))
+    await expect_err(word(rq), 8, unchecked=True)
+    tb.sync_from_rtl()
+    # the first error is the one reported
+    tb.add_raw(word(isa.C("VEC", vop=7, len=4, imm=40)))
+    tb.add_raw(word(isa.C("GEMM", M=1, N=16, K=16)))
+    await tb.drain()
+    assert tb.err() == (1, 3)
+    # a legal command after an error still executes
+    for t in range(3):
+        tb.add(isa.C("LUT_LOAD", table=t, src_addr=P_LUT + 512 * t))
+    tb.add(g.vec())
+    await tb.drain()
+    tb.compare_all()
+
+
+async def clear(tb, hard=False):
+    """Pulse the engine clear (or rst_n) for one cycle; the bench keeps answering reads that
+    are in flight (unless hard). Afterwards the RTL must be idle, write nothing, pulse no done;
+    tables, slots and saturation counters start from zero."""
+    d = tb.dut
+    tb.checking = False
+    tb.cmdq.clear()
+    tb.holding = None
+    if hard:
+        await tb.hard_reset()
+    else:
+        await FallingEdge_(d)
+        d.clr.value = 1
+        await FallingEdge_(d)
+        d.clr.value = 0
+    tb.writes = []
+    n0 = tb.dones
+    for _ in range(60):
+        await tb.cycle()
+    assert tb.dones == n0, "done after clear"
+    assert not tb.writes, "writes after clear"
+    assert int(d.busy.value) == 0
+    assert all(not p.q for p in tb.ports), "read responses outstanding after clear"
+    tb.expect.clear()
+    tb.checking = True
+    tb.sync_from_rtl()
+    tb.fs.sfu.clear()
+    tb.sat = [0] * 5
+    tb.sat_base = [0] * 5
+
+
+async def FallingEdge_(d):
+    from cocotb.triggers import FallingEdge
+    await FallingEdge(d.clk)
+
+
+@cocotb.test()
+async def vec_seq_clear_mid_command(dut):
+    """clr (soft reset) and rst_n at random points inside long commands, with reads in flight;
+    then the engine runs a fresh batch correctly."""
+    tb = TB(dut, seed=31, lat=8)
+    await tb.start()
+    rng = random.Random(32)
+    g = Gen(tb, rng)
+    g.setup()
+    await tb.drain()
+    for trial in range(6):
+        long_cmds = [g.ln(), g.vec(), g.requant(), g.softmax(), g.gelu()]
+        c = long_cmds[trial % len(long_cmds)]
+        tb.checking = False
+        tb.cmdq.append(word(c))
+        tb.cmdq.append(word(g.vec()))
+        for _ in range(rng.randrange(5, 300)):
+            await tb.cycle()
+        await clear(tb, hard=(trial % 3 == 2))
+        for t in range(3):
+            tb.add(isa.C("LUT_LOAD", table=t, src_addr=P_LUT + 512 * t))
+        cmds = [g.any() for _ in range(4)]
+        for c2 in cmds:
+            tb.add(c2)
+        await tb.drain()
+        tb.compare_all()
+        assert tb.err() == (0, 0)
+
+
+@cocotb.test()
+async def vec_seq_residency(dut):
+    """Parameter slots: a repeated block is a hit (no PBUF reads), a snooped rewrite of it is a miss,
+    eviction beyond the slot count reloads; cycle costs are logged for docs/vector-unit.md §9."""
+    tb = TB(dut, seed=41, p_ar=1.0, p_w=1.0, p_cmd=1.0, lat=2)
+    await tb.start()
+    rng = random.Random(42)
+    g = Gen(tb, rng)
+    g.setup()
+    await tb.drain()
+
+    async def one(c):
+        h0, m0, l0 = u(dut.st_hits), u(dut.st_misses), u(dut.st_lines)
+        rp0 = tb.ports[2].reads
+        c0 = tb.cyc
+        tb.add(c)
+        await tb.drain()
+        tb.compare_all()
+        cyc = tb.done_cycles[-1] - c0
+        return u(dut.st_hits) - h0, u(dut.st_misses) - m0, u(dut.st_lines) - l0, tb.ports[2].reads - rp0, cyc
+
+    addr, cols = g.lnb[0]
+    ln = g.ln()
+    ln.f.update(param_addr=addr, cols=cols, rows=1, src_stride=rup(2 * cols) // LINE + 1, in16=1,
+                dst_stride=rup(cols) // LINE)
+    first = await one(ln)
+    again = await one(ln)
+    assert again[:4] == (1, 0, 0, 0), again
+    tb.write_mem(isa.PBUF, addr, ln_variant(rng, cols, 5))      # snooped rewrite
+    third = await one(ln)
+    assert third[:3] == (0, 1, ln_block_layout(cols)[2] // LINE), third
+    dut._log.info(f"LN 1x{cols}: miss {first[4]} cycles, hit {again[4]} cycles, "
+                  f"reload {third[2]} lines")
+    # LUT_LOAD from the same address again: hit, 0 lines
+    lut = await one(isa.C("LUT_LOAD", table=1, src_addr=P_LUT + 512))
+    assert lut[:4] == (1, 0, 0, 0), lut
+    lut2 = await one(isa.C("LUT_LOAD", table=1, src_addr=P_LUT2 + 512))
+    assert lut2[:3] == (0, 1, 32), lut2
+    dut._log.info(f"LUT_LOAD: miss {lut2[4]} cycles, hit {lut[4]} cycles")
+    # GELU tables: 6 distinct blocks through NG = 4 slots
+    hits = 0
+    for rep in range(2):
+        for i in range(N_GELU):
+            c = g.gelu()
+            c.f.update(lut_addr=P_GELU + 256 * i)
+            hits += (await one(c))[0]
+    assert hits == 0, "6 tables round-robin through 4 slots: every access misses"
+    for rep in range(2):
+        for i in range(3):
+            c = g.gelu()
+            c.f.update(lut_addr=P_GELU + 256 * i)
+            r = await one(c)
+            if rep == 1:
+                assert r[0] == 1, r
+    # softmax ctx records: 4 used repeatedly are resident
+    for rep in range(3):
+        for i in range(4):
+            c = g.softmax()
+            c.f.update(ctx_addr=P_CTX + 16 * i)
+            r = await one(c)
+    assert r[0] == 1

@@ -9,7 +9,7 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 | SG2 | M2 | PE, weight-stationary systolic array (INT8 + INT4 mode), scratchpad SRAM; cocotb vs `gemm_i8` | `make test-rtl` (array tests) | done |
 | SG3 | M3a | Requant unit (C2), vector ALU (add/mul/max/shift/sat), reduction tree; cocotb vs numerics | `make test-rtl` (vec tests) | done (wave 1; spec docs/vector-unit.md) |
 | SG4 | M1 | Command ISA + encoder, compiler skeleton (tiling, buffer alloc), cycle model, roofline report; array/lane sizing ADR-003 | `pytest tests/py -k "isa or compiler or cyclemodel or funcsim"` | done (ADR-003 proposed) |
-| SG5 | M3b | SFUs + softmax/LayerNorm/GELU RTL per ADR-002 | | wave 2 |
+| SG5 | M3b | SFUs + softmax/LayerNorm/GELU RTL per ADR-002 | | done (spec + timing docs/sfu.md) |
 | SG4b | M1 | Compiler/funcsim consume the SG1 bundle and C5 integer ops (no float placeholders), W4A8 group-scale lowering; compiled `tiny` in funcsim bit-identical to golden.py | `pytest tests/py -k "funcsim_golden or compiler"` | done (ADR-004 proposed: GEMM_GS, LUT_LOAD, alignment rule) |
 | SG6 | M4 | Command processor, DMA, AXI (cocotbext-axi), formal on FIFOs/arbiters | | done (docs/control.md; verify `SIM=verilator pytest tests/rtl -k "cmd or dma or csr or sem or ctrl"`) |
 | SG7 | M5 | Top-level integration; `tiny` decode bit-exact in sim; AUDIT-1 | | wave 3 |

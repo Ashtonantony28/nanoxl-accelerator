@@ -97,9 +97,10 @@ module sem_unit #(
     always_comb if (f_init) assume (!rst_n);
     always_comb assume (!clr);
 
-    // ghost totals per semaphore: granted signals and granted wait units, 16 bits wide
-    logic [15:0] f_sig [0:NSEM-1];
-    logic [15:0] f_wt  [0:NSEM-1];
+    // ghost totals per semaphore: granted signals and granted wait units (GW bits)
+    localparam int GW = CW + 4;
+    logic [GW-1:0] f_sig [0:NSEM-1];
+    logic [GW-1:0] f_wt  [0:NSEM-1];
     // exact (wide) next value, to show the narrow counter never wraps either way
     logic signed [33:0] f_next [0:NSEM-1];
     always_comb begin
@@ -124,13 +125,13 @@ module sem_unit #(
                     if (sig_gnt[q]  && 32'(ss[q]) == s) inc = inc + 1;
                     if (wait_gnt[q] && 32'(ws[q]) == s) dec = dec + 32'(wc[q]);
                 end
-                f_sig[s] <= f_sig[s] + 16'(inc);
-                f_wt[s]  <= f_wt[s]  + 16'(dec);
+                f_sig[s] <= f_sig[s] + GW'(inc);
+                f_wt[s]  <= f_wt[s]  + GW'(dec);
             end
         end
     end
     // bound the ghost counters so they cannot wrap within the proof
-    always_comb for (int s = 0; s < NSEM; s++) assume (f_sig[s] < 16'hF000);
+    always_comb for (int s = 0; s < NSEM; s++) assume (32'(f_sig[s]) < (1 << GW) - 8);
 
     always_comb begin
         if (!f_init && rst_n) begin

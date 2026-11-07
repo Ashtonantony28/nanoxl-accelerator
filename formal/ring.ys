@@ -1,0 +1,8 @@
+# yosys script: elaborate the FORMAL properties of the module into an SMT2 model
+# (paths relative to formal/; run every proof with: python3 formal/run_formal.py)
+read_verilog -formal -sv ../rtl/cmd_ring_ptr.sv
+chparam -set PW 4 -set AW 13 -set FDEPTH 4 -set FBURST 3 cmd_ring_ptr
+prep -top cmd_ring_ptr
+async2sync
+dffunmap
+write_smt2 -wires ring.smt2

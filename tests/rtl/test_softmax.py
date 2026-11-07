@@ -17,3 +17,13 @@ def test_softmax(L):
         rows, gold = {1: 80, 4: 400, 16: 1200}[L], {1: 60, 4: 300, 16: 600}[L]
     run("softmax", SRC, "softmax_cocotb", parameters={"L": L, "CTX_MAX": 256, "NCTX": 8},
         extra_env={"L": str(L), "CTX_MAX": "256", "N_ROWS": str(rows), "N_GOLDEN": str(gold)})
+
+
+@pytest.mark.parametrize("L,RQL", [(4, 1), (16, 4)])
+def test_softmax_rq_shared(L, RQL):
+    # score requant on RQL < L lanes (docs/fpga.md C6): every softmax test, SOFTMAX_RQ bit-exact P and
+    # exact clamp counts, (L/RQL + 2)*nb + 19 cycles per requant row
+    rows, gold = (600, 0) if VERILATOR else (300, 300)
+    run("softmax", SRC, "softmax_cocotb", parameters={"L": L, "CTX_MAX": 256, "NCTX": 8, "RQL": RQL},
+        extra_env={"L": str(L), "RQL": str(RQL), "CTX_MAX": "256", "N_ROWS": str(rows),
+                   "N_GOLDEN": str(gold)})

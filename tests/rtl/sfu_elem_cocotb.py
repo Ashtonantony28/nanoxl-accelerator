@@ -15,6 +15,8 @@ from sfu_common_cocotb import (OP_EXP2, OP_GELU, OP_RECIP, OP_RSQRT, Sink, Sourc
 
 L = env_int("L", 4)
 NG = env_int("NG", 4)
+EL = env_int("EL", L)          # EXP2 / RECIP / RSQRT primitive lanes
+R = L // EL                     # cycles per EXP2 / RECIP / RSQRT beat
 EXHAUSTIVE = env_int("EXHAUSTIVE", 1)
 N_RAND = env_int("N_RAND", 2000)
 INPUTS = ["in_valid", "in_op", "in_slot", "in_data", "in_keep", "in_last", "out_ready",
@@ -136,7 +138,8 @@ async def elem_bundle_tables(dut):
     # full rate on one third, then two backpressure regimes, each on a shuffled subset
     a, b = n // 3, 2 * n // 3
     cyc = await run_items(dut, items[:a], tabs, 1.0, 1.0, 11)
-    assert cyc <= a + 8, f"not full throughput: {a} beats took {cyc} cycles"
+    need = sum(R if it[0] <= OP_RSQRT else 1 for it in items[:a])   # shared ops: R cycles per beat
+    assert cyc <= need + 8 + R, f"not full throughput: {a} beats ({need} cycles of work) took {cyc} cycles"
     sub = items[a:]
     rows = []
     cur = []
@@ -195,7 +198,8 @@ async def elem_gelu_exhaustive(dut):
 
 @cocotb.test()
 async def elem_pipeline_depth(dut):
-    """A single beat accepted at edge k appears on out_* after edge k+5 (6 stages)."""
+    """A single beat accepted at edge k appears on out_* after edge k+5 (6 stages); an EXP2
+    beat with shared lanes (EL < L) after edge k+5+R-1, and in_ready is low for R-1 cycles."""
     await start(dut, INPUTS)
     tabs = bundle_luts()
     await load_tables(dut, tabs[0], tabs[1], tabs[2], tabs[3][:NG])
@@ -210,7 +214,11 @@ async def elem_pipeline_depth(dut):
     assert dut.in_ready.value == 1
     await FallingEdge(dut.clk)
     dut.in_valid.value = 0
-    n = 1
+    for _ in range(R - 1):
+        await ReadOnly()
+        assert dut.in_ready.value == 0
+        await FallingEdge(dut.clk)
+    n = R
     while True:
         await ReadOnly()
         if dut.out_valid.value == 1:
@@ -218,5 +226,5 @@ async def elem_pipeline_depth(dut):
         await RisingEdge(dut.clk)
         n += 1
         assert n < 20
-    assert n == 6, n
+    assert n == 6 + R - 1, n
     assert unpack(u(dut.out_data), L, 32) == [32768] * L

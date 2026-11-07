@@ -34,7 +34,15 @@ module sfu #(
     parameter int D_MAX   = 384,
     parameter int NG      = 4,
     parameter int NSLOT   = 16,
-    parameter int NCTX    = 8
+    parameter int NCTX    = 8,
+    // shared lanes (docs/fpga.md §2.3 C3 / C6; results unchanged):
+    // EL      elementwise EXP2 / RECIP / RSQRT primitive lanes (L/EL cycles per beat; the
+    //         compiler emits none of these sub-ops). GELU stays at L lanes.
+    // SM_RQL  softmax score-requant lanes (SOFTMAX_RQ streams in at L/SM_RQL cycles per
+    //         beat). 16 = the int32 rate of the 64-byte VEC A port (VP = 4), so at L = 64 the
+    //         port, not the requant, still sets the pace.
+    parameter int EL      = (L > 8) ? 8 : L,
+    parameter int SM_RQL  = (L > 16) ? 16 : L
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -143,7 +151,7 @@ module sfu #(
     logic el_out_last, sm_out_last, ln_out_last;
     logic sm_busy, ln_busy, sm_err, ln_err;
 
-    sfu_elem #(.L(L), .NG(NG)) u_elem (
+    sfu_elem #(.L(L), .NG(NG), .EL(EL)) u_elem (
         .clk(clk), .rst_n(rst_n),
         .in_valid(in_valid && in_ready && sel == U_EL), .in_ready(el_in_ready),
         .in_op(in_op), .in_slot(in_imm[7:0]), .in_data(in_data), .in_keep(in_keep),
@@ -154,7 +162,7 @@ module sfu #(
     );
 
     logic sm_sticky;
-    softmax #(.L(L), .CTX_MAX(CTX_MAX), .NCTX(NCTX)) u_sm (
+    softmax #(.L(L), .CTX_MAX(CTX_MAX), .NCTX(NCTX), .RQL(SM_RQL)) u_sm (
         .clk(clk), .rst_n(rst_n),
         .in_valid(in_valid && in_ready && sel == U_SM), .in_ready(sm_in_ready),
         .in_data(in_data), .in_keep(in_keep), .in_last(in_last),

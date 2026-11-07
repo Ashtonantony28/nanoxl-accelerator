@@ -10,11 +10,11 @@ model-bundle data loaded at run time, in the PBUF layouts of `docs/isa.md` §3 (
 
 | File | Module | What it is |
 |---|---|---|
-| `rtl/lut_rom.sv` | `lut_rom` | runtime-written table: one PBUF line (WN entries) per write, one synchronous read port with enable |
+| `rtl/lut_rom.sv` | `lut_rom` | runtime-written table: 2^AW/WN lines of WN entries (one PBUF line per write), one synchronous read port with enable; maps to LUTRAM |
 | `rtl/sfu_exp2.sv` | `sfu_exp2` | C5 EXP2, one lane, 2 stages |
 | `rtl/sfu_recip.sv` | `sfu_recip` | C5 RECIP (LUT + 1 Newton step), one lane, 4 stages |
 | `rtl/sfu_rsqrt.sv` | `sfu_rsqrt` | C5 RSQRT (LUT + 1 Newton step), one lane, 5 stages |
-| `rtl/sfu_elem.sv` | `sfu_elem` | L-lane elementwise pipeline: EXP2, RECIP, RSQRT, GELU LUT; 6 stages |
+| `rtl/sfu_elem.sv` | `sfu_elem` | L-lane elementwise pipeline: GELU LUT on L lanes, EXP2 / RECIP / RSQRT on EL shared lanes; 6 stages |
 | `rtl/softmax.sv` | `softmax` | C5 SOFTMAX, exact full-row 3-pass with a row buffer (CTX_MAX); optional SOFTMAX_ONLINE score requant front end (SG3 `requant`) with per-layer score records and causal limit |
 | `rtl/layernorm.sv` | `layernorm` | C5 LN with per-slot constants and g/b (D_MAX, NSLOT), saturation counters |
 | `rtl/sfu.sv` | `sfu` | the hook-side block: routing, in-order output, configuration port, status |
@@ -88,14 +88,34 @@ parameters stay resident across tokens, so a loader that keeps a slot per (layer
 loads them once per program (the full tiny bundle is 614 line writes); a loader that
 reloads a block before every LN command pays the line count above per command.
 Tables are replicated per lane read port (`lut_rom` per consumer lane), as an FPGA mapping
-would do with LUTRAM anyway; one write updates every copy.
+would do with LUTRAM anyway; one write updates every copy. Each copy is stored as lines of one
+PBUF line (WN = 8 uint16 or 16 int8 entries): one write port writing a whole line, one read
+port reading a whole line asynchronously, the entry selected by the low address bits in front
+of the read register. That is a plain 1W/1R memory, so it maps to LUTRAM (a 256 × uint16 table:
+10 RAM32M16 + 48 LUT + 16 FF; a GELU table of 8 slots: 38 RAM64M8 + 90 LUT + 8 FF) instead of
+flip-flops and a 256:1 mux (docs/fpga.md §2.3 C1). Read timing and contents are unchanged.
 
 ## 3. Elementwise pipeline (`sfu_elem`)
 
-6 stages, 1 beat/cycle, whole-pipeline stall (`in_ready = !out_valid || out_ready`). Every
-primitive sees every beat; each is fed from the tap of an input delay line that makes all
-of them finish in stage 5, and stage 6 selects by the per-beat op and packs. Op and slot
-travel with the beat, so rows of different ops follow each other with no bubble.
+6 stages, whole-pipeline stall (`in_ready = (!out_valid || out_ready)` and no sub-beat
+pending). Each primitive is fed from the tap of an input delay line that makes all of them
+finish in stage 5, and stage 6 selects by the per-beat op and packs. Op and slot travel with
+the beat, so rows of different ops follow each other with no bubble.
+
+**Lane sharing** (parameter `EL`, docs/fpga.md §2.3 C3). GELU and the pass-through sub-ops
+have L lanes and run at one beat per cycle. EXP2, RECIP and RSQRT have `EL` primitive lanes
+(`EL` divides L; `sfu` sets `EL = min(L, 8)`): a beat of those ops is split into R = L/EL
+sub-beats that enter the pipeline on consecutive cycles (sub-beat 0 straight from `in_data`,
+the rest from a shift register) and are shifted into the output register from the top;
+`out_valid` rises with the last one. So they cost R cycles per beat and R − 1 cycles of extra
+latency; results are unchanged. The compiler emits no elementwise EXP2 / RECIP / RSQRT (softmax
+and LN use their own primitives), so no compiled program is slower.
+
+| L (as built) | EL | EXP2 / RECIP / RSQRT | GELU, pass-through |
+|---|---|---|---|
+| 4 | 4 | 1 cycle / beat (4 elements) | 1 cycle / beat |
+| 16 | 8 | 2 cycles / beat (8 elements per cycle) | 1 cycle / beat |
+| 64 | 8 | 8 cycles / beat (8 elements per cycle) | 1 cycle / beat |
 
 | Primitive | Stages | Work |
 |---|---|---|
@@ -104,7 +124,8 @@ travel with the beat, so rows of different ops follow each other with no bubble.
 | EXP2 | E1 LUT[`d & 255`], `q = d >> 8` · E2 `q ≥ 16 ? 0 : lut >> q` | none |
 | GELU | E1 LUT[`{slot, x & 0xFF}`] | none |
 
-Latency: a beat accepted at edge k is on `out_*` after edge k+5 (test `elem_pipeline_depth`).
+Latency: a GELU / pass-through beat accepted at edge k is on `out_*` after edge k+5, an EXP2 /
+RECIP / RSQRT beat after edge k+5+R−1 (test `elem_pipeline_depth`).
 
 ## 4. SOFTMAX (`softmax`)
 
@@ -112,7 +133,12 @@ C5 exactly, as the full-row 3-pass (an online variant is not bit-identical; ADR-
 
 0. **Requant front end** (SOFTMAX_RQ only): per lane `(acc << ls)` (32-bit wrap) into the SG3
    `requant` pipeline (6 stages) with the slot's `bias, mult, shift`, int16 out; clamps are
-   counted (`sm_sat_count`). `NCTX` record slots.
+   counted (`sm_sat_count`). `NCTX` record slots. The requantizer has `RQL` lanes (parameter,
+   divides L; `sfu` sets `SM_RQL = min(L, 16)`, docs/fpga.md §2.3 C6): with RQL < L each int32
+   beat goes through as R = L/RQL sub-beats on consecutive cycles (sub-beat 0 straight from the
+   input, the rest from a shift register) and is reassembled before the row buffer, so the row
+   streams in at one beat per R cycles. 16 lanes is the int32 rate of the 64-byte VEC A port,
+   so at L = 64 the requant costs 48 × 4 = 192 DSP48E2 less for a few cycles per row (below).
 1. **Pass 1** (while the row streams in, `in_ready = 1`): `M = max s_j` over visible lanes
    (`keep` and column < visible count); the int16 row, its keep bits and its mask go into
    the row buffer (`ceil(CTX_MAX/L)` beats).
@@ -123,8 +149,8 @@ C5 exactly, as the full-row 3-pass (an online variant is not bit-identical; ADR-
 
 | Pipeline (passes 2/3) | A buffer read · B d, EXP2 E1 · C EXP2 E2, sum (pass 2) · D product (pass 3) · E round, clamp, out register |
 |---|---|
-| Cycles per row, full rate (measured) | **SOFTMAX: 3·nb + 13**, nb = ceil(len/L): nb in, nb + 3 pass 2, 5 RECIP, nb + 5 pass 3. **SOFTMAX_RQ: 3·nb + 19** (+6 requant pipeline) |
-| Examples (SOFTMAX_RQ) | ctx 256: 211 cycles at L = 4, 67 at L = 16, 787 at L = 1. ctx 128 (tiny) at L = 4: 115. KV260 L = 64, ctx 256: 31 |
+| Cycles per row, full rate (measured) | **SOFTMAX: 3·nb + 13**, nb = ceil(len/L): nb in, nb + 3 pass 2, 5 RECIP, nb + 5 pass 3. **SOFTMAX_RQ: (R + 2)·nb + 19** (R·nb in, +6 requant pipeline; R = L/RQL, 1 at L ≤ 16) |
+| Examples (SOFTMAX_RQ) | ctx 256: 211 cycles at L = 4, 67 at L = 16, 787 at L = 1. ctx 128 (tiny) at L = 4: 115. KV260 L = 64 (RQL = 16), ctx 256: 43 (31 with RQL = 64) |
 | Backpressure | `out_ready` stalls pass 3 only; the next row is accepted once pass 3 has drained |
 
 The softmax itself cannot saturate (C5 bounds); the only clamp is the score requant of
@@ -178,7 +204,7 @@ line writes and loads the LN blocks / GELU tables / score records from PBUF into
 | Command | Measured SFU occupancy | Cycle-model knobs |
 |---|---|---|
 | `LN` (rows × cols) | rows × (3·ceil(cols/L) + 19); rows do not overlap; + block load 2 + ceil(cols/8) + ceil(cols/4) cycles if the slot is not resident | `sfu_row_bubble = 19`, `row_latency_ln = 0` |
-| `SOFTMAX_ONLINE` (rows × cols) | rows × (3·ceil(cols/L) + 19) (int32 scores via SOFTMAX_RQ); + 1 cycle per score record load | `sfu_row_bubble = 19`, `row_latency_softmax = 0` |
+| `SOFTMAX_ONLINE` (rows × cols) | rows × ((R + 2)·ceil(cols/L) + 19) (int32 scores via SOFTMAX_RQ; R = L/SM_RQL = 4 at L = 64, else 1); + 1 cycle per score record load. In vec_seq the int32 A-port rate hides most of R (`VEC_CAL[·][64]["sm"]` refit for SG11a) | `sfu_row_bubble = 19`, `row_latency_softmax = 0` |
 | `LUT_LOAD` | 32 cycles per table (one 16-byte line per cycle; the ADR-004 model assumes 16) | `LUT_ENTRIES // 8` |
 | `GELU` (len) | ceil(len/L) cycles + 6 latency, back to back with other elementwise rows; + 16 cycles per table load | — |
 
@@ -193,9 +219,9 @@ the same on Icarus (default `SIM`). Sample sizes are larger under Verilator.
 
 | Test | What it checks |
 |---|---|
-| `test_sfu_elem.py` (L = 1, 4, 16) | EXP2 **exhaustive** over all 65,536 inputs (junk in the upper lane bits), GELU **exhaustive** (256 × 4 bundle tables), RECIP over [2^15, 2^32) and RSQRT over [0, 2^32): every binade edge + 2–8k random each. Ops shuffled back to back, interior keep holes, three handshake regimes; full-rate throughput; depth = 6. A second test loads **random tables** (all four) and checks the unit follows them, then reloads the bundle tables. |
+| `test_sfu_elem.py` (L = 1, 4, 16; shared lanes L/EL = 4/1, 16/4, 16/8) | EXP2 **exhaustive** over all 65,536 inputs (junk in the upper lane bits), GELU **exhaustive** (256 × 4 bundle tables), RECIP over [2^15, 2^32) and RSQRT over [0, 2^32): every binade edge + 2–8k random each. Ops shuffled back to back, interior keep holes, three handshake regimes; full-rate throughput; depth = 6. A second test loads **random tables** (all four) and checks the unit follows them, then reloads the bundle tables. |
 | `test_gelu.py` (L = 1, 4) | GELU exhaustive for every per-layer table of the tiny bundle, shuffled inputs. |
-| `test_softmax.py` (L = 1, 4, 16) | **SOFTMAX_RQ**: the golden model's int32 `q·K^T` rows (all keys of the step, causal limit i + 1, the layer's score record), P bit-exact and, on Verilator with every row replayed, the score clamp count equal to `Golden.sat_count["h{l}.score"]`; random int32 rows on random records (bias, ls 0..3, every shift) with clamps counted exactly, `sat_clr`; full-rate count 3·nb + 19. Records written as PBUF lines. Random int16 rows (lengths 1..256, six logit distributions, 25 % with interior masks, 20 % with a causal limit); **real attention-score rows** captured from `nanoxl.golden` on the tiny bundle (all 4·4·128 = 2,048 rows on Verilator, a sample incl. the long rows on Icarus), bit-exact against the golden P; corners: all-equal rows, ±32768 alternating and single-outlier rows, length 1 and 256, the EXP2 cut-off d = 15·256..16·256, masked lanes holding the row maximum, a single kept lane; full-rate cycle count = 3·nb + 13 exactly; `err_len` on a CTX_MAX + L + 1 element row and recovery. |
+| `test_softmax.py` (L = 1, 4, 16; shared score requant L/RQL = 4/1, 16/4) | **SOFTMAX_RQ**: the golden model's int32 `q·K^T` rows (all keys of the step, causal limit i + 1, the layer's score record), P bit-exact and, on Verilator with every row replayed, the score clamp count equal to `Golden.sat_count["h{l}.score"]`; random int32 rows on random records (bias, ls 0..3, every shift) with clamps counted exactly, `sat_clr`; full-rate count 3·nb + 19. Records written as PBUF lines. Random int16 rows (lengths 1..256, six logit distributions, 25 % with interior masks, 20 % with a causal limit); **real attention-score rows** captured from `nanoxl.golden` on the tiny bundle (all 4·4·128 = 2,048 rows on Verilator, a sample incl. the long rows on Icarus), bit-exact against the golden P; corners: all-equal rows, ±32768 alternating and single-outlier rows, length 1 and 256, the EXP2 cut-off d = 15·256..16·256, masked lanes holding the row maximum, a single kept lane; full-rate cycle count = 3·nb + 13 exactly; `err_len` on a CTX_MAX + L + 1 element row and recovery. |
 | `test_layernorm.py` (L = 1, 4, 16) | Every slot is loaded from its PBUF LN block (`nanoxl.funcsim.ln_block`), line by line. Slots 0..8 = the tiny bundle's LayerNorms, slots 9..15 random constants (eps_q 0..2^30, sqrt_d of a wider LN, every `sh`, extreme g/b, small g with many exact rounding halves) for rows up to 384. Random rows (lengths 1..384, interior masks) with both saturation points exercised and the counters equal to the reference counts; **every LN input row** of one 128-token golden forward pass (9·128 = 1,152 rows; sampled at L = 1, 4 on Icarus), bit-exact, with the counters equal to `Golden.sat_count`; corners: all-equal rows (Q = eps_q, Q = 0 → 1), ±32768 rows, one-outlier rows, length 1, L ± 1, 383, 384; full-rate cycle count = 3·nb + 19; `sat_clr`/sticky; `err_len` and recovery. |
 | `test_sfu_vec.py` (L = 1, 4, 16) | `vec_unit` + `sfu` end to end: random command mixes of ALU, REQUANT, REDUCE and every SFU sub-op (incl. SOFTMAX_RQ with causal limits, reserved → `illegal_op`) with random valid gaps / backpressure on all six streams; LUT_LOAD tables, GELU tables, LN blocks and score records written through the cfg port as PBUF lines; every D and R beat, all five saturation counters, `illegal_op`, `busy`. A layer-like back-to-back sequence (LN per slot, GELU per table, softmax and SOFTMAX_RQ rows, lengths 1..256). |
 | `test_sfu_synth.py` (slow) | Yosys generic synthesis at L = 4, no latches (§8). |
@@ -229,11 +255,9 @@ are the multipliers and the memory read muxes.
   row buffer (ping-pong) would overlap pass 1 of row n+1 with passes 2–3 of row n and bring
   the cost to ≈ 2·nb per row; worth it only if ADR-003's schedule shows the SFU on the
   critical path (decode rows are short: H softmax rows of p+1 elements and 2 LN rows per layer).
-- **Multipliers per lane**: elementwise 5 (RECIP 2, RSQRT 3), softmax 1 (16×24) + the
-  score requant's 32×32 (SOFTMAX_RQ), LN 3
-  (17×17, 18×32, 16×16), plus scalar srdhm (32×32), RECIP and RSQRT. At L = 64 the
-  elementwise RECIP/RSQRT lanes dominate; the model only needs them per row (inside softmax
-  and LN), so ADR-003 may drop the elementwise RECIP/RSQRT lanes (keep EXP2/GELU) to save DSPs.
+- **Multipliers per lane**: elementwise 5 per shared lane (RECIP 2, RSQRT 3; `EL` lanes, not L),
+  softmax 1 (16×24) per lane + the score requant's 32×32 per requant lane (`SM_RQL`), LN 3
+  (17×17, 18×32, 16×16), plus scalar srdhm (32×32), RECIP and RSQRT.
 - **Tables per lane**: each consumer lane has its own copy (one read port each); the cfg
   port writes all copies at once.
 - `in_fmt` and `in_shamt` from the hook are not used by any C5 op.

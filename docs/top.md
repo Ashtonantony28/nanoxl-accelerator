@@ -190,6 +190,13 @@ Modelled KV260 shakespeare (N = 32, L = 64, 256-token prefill, `estimate(SHAKESP
 tok/s W8A8 / W4A8, single-DMA-master bound; see below for SG10a). The prefill critical path is 77 % GEMM, 8 % softmax (int32
 scores at 16 per cycle), 7 % attention GEMMs, 4 % LN.
 
+**SG11a (shared softmax score requant, `SM_RQL = 16` at L = 64, docs/fpga.md §2.3 C6):** the SOFTMAX_ONLINE
+rows at L = 64 cost 3 cycles more each at PL = 1 and 3-6 more at PL = 4 (re-measured,
+`bench/results/vec_seq_perf.json`, `VEC_CAL[·][64]` refit). Modelled KV260 (current model with SG10a + SG10b):
+shakespeare W8A8 prefill 14.01 → 14.17 ms (+1.2 %), decode 619.4 → 619.3 tok/s; tiny prefill 0.969 →
+1.005 ms, decode 5321 → 5316 tok/s. L ≤ 16 builds are unchanged (SM_RQL = L), and so is GELU / LN timing
+at every L.
+
 ### 6.1 Two DMA masters, pipelined DMA, carried SIGNALs (SG10a, ADR-005)
 
 Same programs and tables as above, on-chip KV, VP = 4. "Before" is main with SG10b and without SG10a

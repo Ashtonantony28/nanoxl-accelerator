@@ -262,3 +262,43 @@ def test_cyclemodel_timing_is_frozen_dataclass():
     assert isinstance(MEASURED, RtlTiming)
     with pytest.raises(Exception):
         MEASURED.qdepth = 4
+
+
+def _top_measured():
+    """docs/top.md §6: measured PERF_CYCLES of nanoxl_top (N=16, L=16, tiny, Verilator) per bundle/KV:
+    (prefill 16 rows, decode min, decode max)."""
+    import re
+    from pathlib import Path
+    txt = (Path(__file__).resolve().parents[2] / "docs" / "top.md").read_text()
+    sec = txt[txt.index("## 6. Performance"):]
+    out = {}
+    for m in re.finditer(r"\| (W[48]A8), (on-chip|DDR KV) \| ([\d,]+) / [\d,]+ [^|]*\| ([\d,]+)–([\d,]+) / ", sec):
+        n = lambda s: int(s.replace(",", ""))
+        out[(m.group(1).lower(), m.group(2) == "on-chip")] = (n(m.group(3)), n(m.group(4)), n(m.group(5)))
+    return out
+
+
+@pytest.mark.parametrize("bundle", ["w8a8", "w4a8"])
+@pytest.mark.parametrize("kv_onchip", [True, False], ids=["onchip", "ddrkv"])
+def test_cyclemodel_matches_measured_top_level(bundle, kv_onchip):
+    """Whole-program check against the RTL top level (docs/top.md §6, SG7c): the same compiled tiny
+    programs at N=16, L=16 with the test instance's buffers; the model is within 10 % of the measured
+    prefill (16 rows) and decode (pos 16 and 23) cycles. Before A1-01 prefill was 13-20 % low."""
+    from pathlib import Path
+    from nanoxl.compiler import Compiler
+    from nanoxl.export import load_bundle
+    from nanoxl.graph import from_bundle
+    from nanoxl.hwconfig import KiB
+    meas = _top_measured()
+    assert len(meas) == 4, meas
+    pre_m, dec_lo, dec_hi = meas[(bundle, kv_onchip)]
+    hw = KV260.with_(array_n=16, lanes=16, kv_onchip=kv_onchip, abuf=64 * KiB, wbuf=32 * KiB, acc=64 * KiB,
+                     pbuf=32 * KiB, kvbuf=128 * KiB)            # tests/rtl/top_cocotb.top_hw
+    g, p = from_bundle(*load_bundle(Path(__file__).resolve().parents[2] / "artifacts" / "models" / "tiny"
+                                    / f"{bundle}.npz"))
+    comp = Compiler(g, p, hw)
+    pre = simulate(comp.compile_step([(0, 16)]).cmds, hw).cycles
+    assert abs(pre / pre_m - 1) < 0.10, (pre, pre_m)
+    for pos in (16, 23):
+        dec = simulate(comp.compile_step([(pos, 1)]).cmds, hw).cycles
+        assert 0.9 * dec_lo < dec < 1.1 * dec_hi, (pos, dec, dec_lo, dec_hi)

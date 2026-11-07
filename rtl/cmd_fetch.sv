@@ -37,7 +37,9 @@ module cmd_fetch #(
     input  logic [IDW-1:0]  m_axi_rid,
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [127:0]    m_axi_rdata,
+    /* verilator lint_off UNUSEDSIGNAL */
     input  logic [1:0]      m_axi_rresp,
+    /* verilator lint_on UNUSEDSIGNAL */
     input  logic            m_axi_rlast,
     input  logic            m_axi_rvalid,
     output logic            m_axi_rready,
@@ -48,10 +50,12 @@ module cmd_fetch #(
     output logic            out_rerr
 );
     logic [8:0]    burst_len;
+    /* verilator lint_off UNUSEDSIGNAL */
     logic [AW-1:0] burst_addr;
+    logic [PW-1:0] fptr;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic          issue, consume;
     logic          busy;           // a burst is issued or being issued
-    logic [PW-1:0] fptr;
     /* verilator lint_off UNUSEDSIGNAL */
     logic [$clog2(FDEPTH+1)-1:0] occ, fcount;
     logic          f_in_ready;

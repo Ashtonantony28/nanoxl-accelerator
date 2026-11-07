@@ -1,4 +1,4 @@
-// cmd_ring.sv -- command-ring pointer logic of the fetcher (module cmd_ring_ptr).
+// cmd_ring_ptr.sv -- command-ring pointer logic of the fetcher.
 //
 // The ring is `size` 16-byte words at `base`. Software owns `tail` (the next word it will write;
 // written through the DOORBELL CSR), hardware owns `head` (the next word to dispatch) and `fptr`

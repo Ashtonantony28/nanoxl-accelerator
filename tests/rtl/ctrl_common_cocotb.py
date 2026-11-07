@@ -205,3 +205,27 @@ def dma_apply(cmd, ddr_read, ddr_write, spad_mem):
             data = bytes(m[(sa + i) % (1 << 21)] for i in range(rb))
             ddr_write(da, data)
 
+
+
+def rand_field(rng, w, k):
+    lo, hi = isa.field_range(w, k)
+    u = rng.random()
+    if u < 0.15:
+        return lo
+    if u < 0.3:
+        return hi
+    return rng.randint(lo, hi)
+
+
+def rand_legal(rng, op, **fixed):
+    """A random command of `op` that nanoxl.isa.validate accepts (fields in `fixed` pinned)."""
+    for _ in range(1000):
+        f = {n: rand_field(rng, w, k) for n, w, k in isa.LAYOUTS[op]}
+        f.update(fixed)
+        c = isa.Cmd(op, f)
+        try:
+            isa.validate(c)
+            return c
+        except isa.IsaError:
+            continue
+    raise RuntimeError(op)

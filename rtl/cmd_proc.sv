@@ -8,9 +8,10 @@
 //   END       -> end_pulse (done interrupt), then continue with the next pending word if
 //                software has already advanced tail past END; otherwise fetching simply
 //                stops because the ring is empty.
-// Errors halt dispatch and queue issue (outstanding engine commands finish): a decode error, an
-// RRESP error on a fetched word, a DMA AXI error (dma_err) or an engine error (eng_err). The
-// first error is captured with the ring index and the word. Only a (soft) reset clears it.
+// Errors halt dispatch (the queues still drain what was dispatched before the error, so every
+// command before a bad word executes and none after it): a decode error, an RRESP error on a
+// fetched word, a DMA AXI error (dma_err) or an engine error (eng_err). The first error is
+// captured with the ring index and the word. Only a (soft) reset clears it.
 // Single-step: with step_mode = 1, each step_pulse lets exactly one word be dispatched
 // (or one barrier execute).
 module cmd_proc #(
@@ -21,6 +22,7 @@ module cmd_proc #(
     input  logic            clk,
     input  logic            rst_n,
     input  logic            clr,
+    input  logic            freeze,        // soft reset draining: no dispatch, no queue issue
     // word stream from the fetcher
     input  logic            in_valid,
     output logic            in_ready,
@@ -49,7 +51,7 @@ module cmd_proc #(
     output logic            all_idle,       // queues idle and no word waiting at a barrier
     output logic [2:0]      q_idle,
     output logic [2:0]      eng_busy,
-    output logic [2:0]      retire_inc,     // commands completed this cycle (0..5)
+    output logic [2:0]      retire_inc,     // commands completed this cycle (0..4)
     output logic [PW-1:0]   last_index,     // ring index of the last dispatched word
     output logic            q_overflow,
     input  logic [4:0]      sem_dbg_sel,
@@ -105,12 +107,12 @@ module cmd_proc #(
     assign is_bar     = (d_kind == K_IRQ) || (d_kind == K_END);
     assign barrier_ok = &q_idle;
     assign d_bad      = in_rerr || (d_err != 4'd0);
-    assign hold       = halted;
+    assign hold       = freeze;          // a halt stops dispatch only; queues drain
 
     always_comb begin
         q_in_valid = '0;
         take       = 1'b0;
-        if (in_valid && !halted && step_ok && !d_bad) begin
+        if (in_valid && !halted && !freeze && step_ok && !d_bad) begin
             if (is_bar) begin
                 take = barrier_ok;
             end else begin
@@ -139,7 +141,7 @@ module cmd_proc #(
             if (take) last_index <= in_index;
             if (irq_pulse) irq_code <= d_irq;
             if (!halted) begin
-                if (in_valid && step_ok && d_bad) begin
+                if (in_valid && step_ok && d_bad && !freeze) begin
                     halted    <= 1'b1;
                     err_code  <= in_rerr ? ERR_FETCH : d_err;
                     err_index <= in_index;

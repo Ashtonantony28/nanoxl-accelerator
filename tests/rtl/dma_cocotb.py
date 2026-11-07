@@ -4,6 +4,7 @@ Python scratchpad model, with random AXI and scratchpad backpressure / latency.
 Env: DMA_MAXB (max burst beats the DUT was built with), DMA_NCMD (random commands).
 Reference: ctrl_common_cocotb.dma_apply (byte-granular geometry of docs/control.md).
 """
+import logging
 import os
 import random
 from collections import deque
@@ -54,6 +55,8 @@ class TB:
                           reset_active_level=False, size=1 << 32)
         if p_axi:
             set_axi_pauses(self.ram, self.rng, p_axi)
+        self.ram.write_if.log.setLevel(logging.WARNING)
+        self.ram.read_if.log.setLevel(logging.ERROR)    # the error test triggers expected warnings
         self.cmd = CmdDriver(dut, self.rng)
         self.sp = SpadModel(dut, self.rng, p_ready=p_sp)
         self.mon = AxiMonitor(dut, "m_axi_", max_beats=MAXB)

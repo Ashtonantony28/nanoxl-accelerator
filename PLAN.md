@@ -17,5 +17,8 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 | SG4c | M1 | Cycle model with measured SG5/SG6 costs, hazard check for semaphore depth, PYNQ host driver (mocked against funcsim) | `pytest tests/py -k "cyclemodel or driver or hazard"` | done (measured-RTL cycle model, ADR-003 update; compiler DMA coalescing; docs/driver.md, board steps untested) |
 | SG7c | M5/M6 | `nanoxl_top` (ctrl_top + DMA + scratchpads + KV tier + engines); compiled `tiny` prefill+decode bit-exact in Verilator vs golden; AUDIT-1 | `pytest tests/rtl -k top` | done (docs/top.md; verify `SIM=verilator pytest tests/rtl -k top`; tiny W8A8/W4A8 x on-chip/DDR KV bit-exact, 16-token prefill + 8 decode; A1-02 SAT map fixed; VEC port widening deferred) |
 | SG8 | M6 | Folded into SG7c (C5 chose full-row softmax; KV modes already in compiler). Online softmax would need a new ADR. | — | merged into SG7c |
+| SG9a | M7 | FPGA flow without hardware: Vivado TCL (KV260 block design, PYNQ-Z2 variant), constraints, overlay packaging; Yosys synth_xilinx resource estimates per board config | `pytest tests/fpga` | wave 5 |
+| SG10a | M8 | Second DMA master on a second HP port (`chan`), DMA command pipelining; measured decode gain | `pytest tests/rtl -k "dma or ctrl or top"` | wave 5 |
+| SG10b | M8 | 64-byte (4-line) VEC engine ports + banked buffer port widening; measured prefill gain | `pytest tests/rtl -k "vec_seq or top"` | wave 5 |
 | SG9 | M7 | Vivado project for KV260, timing, PYNQ driver (sim-checked; board run needs hardware) | | wave 4 |
 | SG10 | M8 | INT4 path, batching, perf; AUDIT-2 | | wave 4 |

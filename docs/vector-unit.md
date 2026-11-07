@@ -246,8 +246,10 @@ In both `requant` and `vec_alu`, most of the cells are the four 32×32 multiplie
 
 `rtl/vec_seq.sv` executes the VEC-queue ISA commands (docs/isa.md §4) on `sfu_vec`
 (vec_unit + SFU). Helpers: `vec_seq_walk.sv` (line-address walker), `vec_seq_rd.sv`
-(source stream: line reads → L-lane beats), `vec_seq_wr.sv` (D beats → lines with byte
-strobes), `pbuf_loader.sv` (parameter loads and slot residency, docs/sfu.md §10).
+(source stream: port beats → L-lane beats), `vec_seq_wr.sv` (D beats → port beats with byte
+strobes), `pbuf_loader.sv` (parameter loads and slot residency, docs/sfu.md §10). Parameter `PL`
+(SG10b): lines per port beat on the A, B, P and D ports; `PL = 1` is the original 16-byte line port
+(cycle-exact with the SG7b RTL), `nanoxl_top` builds `PL = VP = 4` (64 bytes).
 Bench: `tests/rtl/test_vec_seq.py` (`vec_seq_cocotb.py`, harness `vec_seq_common_cocotb.py`).
 
 ### 9.1 Ports
@@ -255,9 +257,9 @@ Bench: `tests/rtl/test_vec_seq.py` (`vec_seq_cocotb.py`, harness `vec_seq_common
 | group | signals | notes |
 |---|---|---|
 | engine | `cmd_valid/cmd_ready/cmd_word[127:0]`, `done`, `err`, `err_code[3:0]`, `busy` | docs/control.md §2. 2-entry command queue; one `done` per command, in order, ≥ 1 cycle after accept, after the last write of the command was accepted |
-| read A, B | `r{a,b}_arvalid/arready/arbuf[2:0]/araddr[16:0]`, `r{a,b}_rvalid/rdata[127:0]` | DMA `sp_*` read shape: line addresses, in-order responses, any latency, no backpressure, ≤ 16 lines in flight per port (credit) |
-| read P | `rp_arvalid/arready/araddr`, `rp_rvalid/rdata` | always PBUF |
-| write D | `wd_valid/wd_ready/wd_buf/wd_addr/wd_data/wd_strb` | a write is complete (visible to every later read) when accepted |
+| read A, B | `r{a,b}_arvalid/arready/arbuf[2:0]/araddr[16:0]`, `r{a,b}_rvalid/rdata[128PL-1:0]` | DMA `sp_*` read shape widened to PL lines: `araddr` = first line of the beat (any line), line j of the response in bits [128j +: 128]; in-order responses, any latency, no backpressure, ≤ 16 beats in flight per port (credit) |
+| read P | `rp_arvalid/arready/araddr`, `rp_rvalid/rdata[128PL-1:0]` | always PBUF |
+| write D | `wd_valid/wd_ready/wd_buf/wd_addr/wd_data[128PL-1:0]/wd_strb[16PL-1:0]` | PL lines from `wd_addr`, byte strobes per line (a line past the row end has strobe 0, and may lie past the buffer end); a write is complete (visible to every later read) when accepted |
 | snoop | `pb_snoop_valid`, `pb_snoop_line[16:0]` | every PBUF line written by another unit (DMA); the engine's own PBUF writes are snooped internally |
 | clear | `clr` | `eng_clr` of the command processor; same effect as reset, except that read responses still in flight are absorbed (no new reads until they are back) |
 | status | `sat_clr`, `sat_cnt[159:0]`, `st_hits/st_misses/st_lines` | `sat_cnt` = {score, ln_z, ln_out, ALU, requant}; wire to `ctrl_top` with `NSAT = 5` (SAT_0..4) |
@@ -290,72 +292,102 @@ are not reproduced for other overlaps. KV_APPEND needs dh % 16 = 0 (the compiler
 
 ### 9.3 Throughput
 
-Each port moves one 16-byte line per cycle, so a stream delivers min(L, 16/eb) elements per
-cycle. At L = 4 everything except int32 at L > 4 runs at vec_unit rate; at L = 16/64 int32
-(REQUANT and softmax scores from ACC) and wide int16 rows are port-bound (L·eb/16 cycles per
-beat). REQUANT also reads one 16-byte record per output channel per chunk (N lines). For the
-KV260 (L = 64) SG7c should widen the ACC/ABUF ports or bank them (a parameterized line width
-is the natural extension of `vec_seq_rd/wr`). Measured (tiny W8A8, L = 4, random port ready
-80 %, latency 1–6): 6-token prefill + 1 decode step = 186 VEC-queue commands in 59k cycles.
+**Port beats (SG10b).** Each port moves one beat of `PL` consecutive 16-byte lines per cycle, from
+any start line. A row (which starts on a line, alignment rule) is read as ceil(lines/PL) beats from
+its first line, PL lines apart; the last beat is ragged: its lines past the row end are read but
+never used (`vec_seq_rd` drops them with the row's last vec_unit beat, whose lanes past the row end
+vec_unit masks), and on the D port they carry strobe 0, as do the bytes past the row end inside its
+last line (`vec_seq_wr`: strobes = the lanes' keep bits). `vec_seq_walk` steps PL lines per beat;
+the read credit counts beats. REQUANT records: `pbuf_loader` reads PL records per P-port beat and
+writes them into the record buffer in one cycle (record `rec_idx + j` from line j). SFU blocks (LN,
+GELU table, ctx record, LUT_LOAD) still enter the SFU through its 16-byte `cfg` port, one line per
+cycle (docs/sfu.md §10), so their load cost does not change with PL. The engine's own PBUF writes are
+snooped per line that carries a strobe.
 
-**Measured per-command occupancy** (AUDIT-1 A1-01; `python3 bench/vec_seq_perf.py`, module
-`bench/vec_seq_perf_cocotb.py`, raw data and command fields in `bench/results/vec_seq_perf.json`).
-Ports always ready, read latency 2, each shape run as two identical back-to-back commands;
-occupancy = done to done (the engine runs one command at a time, so this includes the drain),
-accept→done of a lone command is 1–3 cycles more. L = 4 and 16 on Icarus, L = 64 on Verilator,
-16-byte ports at every L (the RTL as built). The second command of a pair is a residency hit
-(LN block, GELU table, score record, LUT) except in the `miss` rows; every command is checked
-against funcsim by the shared harness.
+A stream therefore delivers min(L, 16·PL/eb) elements per cycle:
 
-| shape | L = 4 | L = 16 | L = 64 |
+| | int8 | int16 | int32 |
 |---|---|---|---|
-| REQUANT M16 N384 | 1999 | 2001 | 2007 |
-| REQUANT M16 N128 | 681 | 682 | 685 |
-| REQUANT M1 N384 | 529 | 531 | 537 |
-| REQUANT M16 N256 out16 | 1321 | 1323 | 1329 |
-| REQUANT M16 N256 pt | 1065 | 1067 | 1070 |
-| REQUANT M4 N64 | 157 | 158 | 161 |
-| REQUANT M1 N65 | 108 | 109 | 112 |
-| SOFTMAX rows16 cols256 | 3393 | 1768 | 1171 |
-| SOFTMAX rows16 cols64 | 1089 | 616 | 388 |
-| SOFTMAX rows1 cols256 | 228 | 133 | 121 |
-| SOFTMAX rows16 cols16 | 513 | 373 | 373 |
-| SOFTMAX rows4 cols128 causal | 477 | 268 | 178 |
-| LN rows1 cols128 | 132 | 69 | 63 |
-| LN rows16 cols128 | 1857 | 804 | 483 |
-| LN rows16 cols128 in8 | 1857 | 706 | 475 |
-| LN rows1 cols384 | 324 | 133 | 115 |
-| LN rows16 cols384 | 4929 | 1828 | 1315 |
-| LN rows1 cols128 miss | 183 | 121 | 115 |
-| LN rows16 cols128 miss | 1909 | 856 | 535 |
-| GELU len512 | 151 | 56 | 59 |
-| GELU len128 | 54 | 32 | 35 |
-| GELU len2048 | 535 | 152 | 155 |
-| GELU len512 miss | 168 | 74 | 77 |
-| VEC ADD int8 len2048 | 526 | 143 | 146 |
-| VEC ADD int16 len2048 | 525 | 272 | 278 |
-| VEC ADD int32 len1024 | 271 | 274 | 286 |
-| VEC COPY int8 len2048 | 525 | 143 | 146 |
-| VEC ADD int8 len128 | 45 | 23 | 26 |
-| VEC ADD int8 len64 | 30 | 19 | 22 |
-| KV_APPEND rows16 heads4 dh32 | 589 | 206 | 207 |
-| KV_APPEND rows1 heads4 dh32 | 48 | 25 | 27 |
-| KV_APPEND rows16 heads6 dh64 | 1645 | 494 | 497 |
-| KV_APPEND rows1 heads6 dh64 | 115 | 44 | 47 |
-| LUT_LOAD hit | 6 | 6 | 6 |
-| LUT_LOAD miss | 40 | 40 | 40 |
+| PL = 1 (16 B) | min(L, 16) | min(L, 8) | 4 |
+| PL = 4 (64 B, as built) | min(L, 64) | min(L, 32) | min(L, 16) |
 
-Reading the table: REQUANT costs the same at every L (int32 ACC rows at 4 elements per cycle,
-plus N record lines: M16 N384 = 384 + 16·(64 + 32) lines + 81 fixed); softmax and int16 LN rows
-are port-bound at L = 16 and 64; int8 streams reach 16 elements per cycle at L ≥ 16, so L = 64
-buys nothing over L = 16 with 16-byte ports. `nanoxl/cyclemodel.py` prices every row of this
-table within 5 % (`VEC_CAL`: the stream terms come from the port and lane widths, only the fixed
-per-command / per-row costs are fitted), pinned by `tests/audit/test_audit1.py::test_a1_01_*`.
+so with PL = 4 every stream runs at vec_unit rate at L ≤ 16, and at L = 64 (KV260) int8 rows do
+too while int16 rows run at 32 and int32 (REQUANT and softmax reading ACC) at 16 elements per cycle:
+**the next VEC bottleneck at L = 64 is still the int32 port rate** (a 16-line, 256-byte A port would
+be needed for 64 int32 per cycle), followed by the SFU's per-row fixed cost (LN / softmax: ~18–23
+cycles per row on top of 3 passes of ceil(cols/L) beats; LN rows16 cols128 at L = 64 is 420 cycles,
+26 per row, of which only 6 are data beats). vec_unit's L lanes consume the wider beats without change
+(a 64-byte int8 response is 4 beats at L = 16, one at L = 64; int32 at L = 64 needs 4 responses per
+beat, assembled in `vec_seq_rd`). On the modelled KV260 shakespeare 256-token prefill the critical path
+is then 77 % GEMM, 8 % softmax, 7 % attention GEMMs, 4 % LN (`nanoxl.cyclemodel`, docs/top.md §6).
+
+**Bank requirement.** A PL-line beat needs PL distinct banks from any start line, so `buf_spad` needs
+NB ≥ PL (checked at elaboration); `nanoxl_top` builds NB = 2 × its widest port, i.e. 8 banks at N ≤ 16
+with VP = 4 and 16 at N = 32 (ACC rows of 8 lines). See docs/top.md §3 for concurrent streams.
+
+**Measured per-command occupancy** (AUDIT-1 A1-01, re-measured for SG10b; `python3 bench/vec_seq_perf.py`,
+module `bench/vec_seq_perf_cocotb.py`, raw data and command fields in `bench/results/vec_seq_perf.json`
+as `{"pl1"|"pl4": {L: ...}}`). Ports always ready, read latency 2, each shape run as two identical
+back-to-back commands; occupancy = done to done (the engine runs one command at a time, so this
+includes the drain), accept→done of a lone command is 1–3 cycles more. L = 4 and 16 on Icarus, L = 64
+on Verilator. The PL = 1 columns are cycle-identical to the SG7b RTL (16-byte ports). The second
+command of a pair is a residency hit (LN block, GELU table, score record, LUT) except in the `miss`
+rows; every command is checked against funcsim by the shared harness. Columns: PL = 1 (L = 4, 16, 64),
+then PL = 4 (L = 4, 16, 64).
+
+| shape | L = 4 | L = 16 | L = 64 | L = 4 | L = 16 | L = 64 |
+|---|---|---|---|---|---|---|
+| REQUANT M16 N384 | 1999 | 2001 | 2007 | 1710 | 559 | 561 |
+| REQUANT M16 N128 | 681 | 682 | 685 | 585 | 201 | 202 |
+| REQUANT M1 N384 | 529 | 531 | 537 | 239 | 169 | 171 |
+| REQUANT M16 N256 out16 | 1321 | 1323 | 1329 | 1129 | 361 | 363 |
+| REQUANT M16 N256 pt | 1065 | 1067 | 1070 | 1065 | 298 | 299 |
+| REQUANT M4 N64 | 157 | 158 | 161 | 109 | 61 | 62 |
+| REQUANT M1 N65 | 108 | 109 | 112 | 60 | 48 | 49 |
+| SOFTMAX rows16 cols256 | 3393 | 1768 | 1171 | 3393 | 1089 | 616 |
+| SOFTMAX rows16 cols64 | 1089 | 616 | 388 | 1089 | 513 | 373 |
+| SOFTMAX rows1 cols256 | 228 | 133 | 121 | 228 | 84 | 61 |
+| SOFTMAX rows16 cols16 | 513 | 373 | 373 | 513 | 368 | 370 |
+| SOFTMAX rows4 cols128 causal | 477 | 268 | 178 | 477 | 189 | 124 |
+| LN rows1 cols128 | 132 | 69 | 63 | 131 | 60 | 45 |
+| LN rows16 cols128 | 1857 | 804 | 483 | 1856 | 704 | 420 |
+| LN rows16 cols128 in8 | 1857 | 706 | 475 | 1857 | 705 | 418 |
+| LN rows1 cols384 | 324 | 133 | 115 | 323 | 107 | 61 |
+| LN rows16 cols384 | 4929 | 1828 | 1315 | 4928 | 1472 | 676 |
+| LN rows1 cols128 miss | 183 | 121 | 115 | 184 | 111 | 97 |
+| LN rows16 cols128 miss | 1909 | 856 | 535 | 1909 | 756 | 472 |
+| GELU len512 | 151 | 56 | 59 | 151 | 54 | 32 |
+| GELU len128 | 54 | 32 | 35 | 54 | 30 | 26 |
+| GELU len2048 | 535 | 152 | 155 | 534 | 151 | 56 |
+| GELU len512 miss | 168 | 74 | 77 | 168 | 73 | 50 |
+| VEC ADD int8 len2048 | 526 | 143 | 146 | 525 | 142 | 47 |
+| VEC ADD int16 len2048 | 525 | 272 | 278 | 526 | 142 | 80 |
+| VEC ADD int32 len1024 | 271 | 274 | 286 | 270 | 79 | 82 |
+| VEC COPY int8 len2048 | 525 | 143 | 146 | 525 | 142 | 47 |
+| VEC ADD int8 len128 | 45 | 23 | 26 | 46 | 22 | 17 |
+| VEC ADD int8 len64 | 30 | 19 | 22 | 30 | 17 | 16 |
+| KV_APPEND rows16 heads4 dh32 | 589 | 206 | 207 | 588 | 204 | 142 |
+| KV_APPEND rows1 heads4 dh32 | 48 | 25 | 27 | 49 | 24 | 22 |
+| KV_APPEND rows16 heads6 dh64 | 1645 | 494 | 497 | 1644 | 493 | 205 |
+| KV_APPEND rows1 heads6 dh64 | 115 | 44 | 47 | 115 | 43 | 26 |
+| LUT_LOAD hit | 6 | 6 | 6 | 6 | 6 | 6 |
+| LUT_LOAD miss | 40 | 40 | 40 | 40 | 40 | 40 |
+
+Reading the table: with 16-byte ports REQUANT costs the same at every L (int32 ACC rows at 4 elements
+per cycle, plus N record lines: M16 N384 = 384 + 16·(64 + 32) lines + 81 fixed); with 64-byte ports
+it drops 3.6× at L = 16 and 64 (M16 N384: 2001 → 559 ≈ 96 record beats + 16·(1 + 16) + 16·(1 + 8) row beats + 2 × 25 fixed;
+L = 64 equals L = 16 because int32 is port bound at 16 per cycle). Softmax and int16 LN rows at L = 64
+halve (1171 → 616, 1315 → 676); int8 streams at L = 64 reach 64 per cycle (GELU len2048 155 → 56,
+KV_APPEND 497 → 205). At L = 4 only REQUANT changes (records 4 per cycle). `nanoxl/cyclemodel.py`
+prices every row of this table within 5 % at its port width (`VEC_CAL[PL][L]`: the stream terms come
+from the port and lane widths, only the fixed per-command / per-row costs are fitted; GELU / LN block
+loads are priced at the 16-byte cfg port), pinned by `tests/audit/test_audit1.py::test_a1_01_*`.
 
 ### 9.4 Verification
 
-`SIM=icarus|verilator python3 -m pytest -q tests/rtl/test_vec_seq.py` (L = 4, 16; slow
-Verilator-only L = 64). Every bench runs funcsim as the reference and checks, at each
+`SIM=icarus|verilator python3 -m pytest -q tests/rtl/test_vec_seq.py` (L = 4, 16 × PL = 1, 4; slow
+Verilator-only L = 64 × PL = 1, 4). The bench's ports move PL lines per beat from any line (reads wrap
+at the buffer end like `buf_spad`); a write line with a strobe must lie inside its buffer. Every bench runs funcsim as the reference and checks, at each
 `done`: the command's whole destination byte for byte, that no write fell outside it (byte
 strobes), and all five saturation counters equal funcsim's per-op counts so far; every
 batch ends with a compare of all five buffers.
@@ -370,4 +402,7 @@ batch ends with a compare of all five buffers.
 | `vec_seq_residency` | hit / miss / snooped-rewrite / eviction behaviour and cycle costs (docs/sfu.md §10) |
 
 Mutation sanity (each killed, then reverted): pbuf_loader without snoop invalidation;
-REQUANT per-channel mult taken from the wrong record. See the SG7b report.
+REQUANT per-channel mult taken from the wrong record (SG7b). SG10b, ragged-beat byte strobes at
+PL = 4, L = 4: int8 lanes past the row end strobed (`ps[j] = 1`), and the narrow-beat merge
+strobing every byte of its slice (`cs_n[p] = 1`); both fail `vec_seq_random` (write outside the
+destination) and were reverted.

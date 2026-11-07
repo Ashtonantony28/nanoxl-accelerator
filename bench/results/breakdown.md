@@ -1,105 +1,104 @@
 Critical-path share and engine occupancy per op class (`python3 bench/roofline.py`; measured-RTL cycle model).
 
-**kv260 shakespeare W8 decode, as built** (754k cycles per token)
+**kv260 shakespeare W8 decode, as built** (753k cycles per token)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 92.5 % | 92.5 % |
-| dma params | 3.5 % | 3.5 % |
-| gemm linear | 0.8 % | 44.1 % |
+| dma weights | 92.7 % | 92.7 % |
+| dma params | 3.5 % | 3.6 % |
+| gemm linear | 0.8 % | 44.2 % |
 | gemm attn | 2.6 % | 2.7 % |
-| requant | 0.1 % | 5.1 % |
+| requant | 0.0 % | 2.3 % |
 
-**kv260 shakespeare W8 prefill, as built** (4402k cycles, T=256)
-
-| op class | critical path | engine busy |
-|---|---|---|
-| dma weights | 0.0 % | 31.7 % |
-| dma params | 0.0 % | 1.2 % |
-| gemm linear | 64.4 % | 60.5 % |
-| gemm attn | 4.7 % | 5.0 % |
-| requant | 4.3 % | 37.4 % |
-| ln | 6.2 % | 6.2 % |
-| softmax | 11.2 % | 11.2 % |
-| gelu | 3.4 % | 3.4 % |
-| vec add | 3.4 % | 3.4 % |
-| kv append | 2.1 % | 2.1 % |
-
-**kv260 shakespeare W8 decode, all fixes** (362k cycles per token)
+**kv260 shakespeare W8 prefill, as built** (3684k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 92.2 % | 92.1 % |
+| dma weights | 0.0 % | 37.9 % |
+| dma params | 0.0 % | 1.5 % |
+| gemm linear | 77.1 % | 72.3 % |
+| gemm attn | 6.6 % | 6.0 % |
+| requant | 1.0 % | 13.7 % |
+| ln | 3.8 % | 3.8 % |
+| softmax | 8.0 % | 7.9 % |
+| gelu | 1.0 % | 1.0 % |
+| vec add | 1.0 % | 1.0 % |
+| kv append | 1.0 % | 1.0 % |
+
+**kv260 shakespeare W8 decode, all fixes** (361k cycles per token)
+
+| op class | critical path | engine busy |
+|---|---|---|
+| dma weights | 92.4 % | 92.2 % |
 | dma params | 3.2 % | 3.2 % |
-| gemm linear | 0.9 % | 46.0 % |
+| gemm linear | 0.9 % | 46.1 % |
 | gemm attn | 2.9 % | 2.8 % |
-| requant | 0.1 % | 5.1 % |
-| softmax | 0.6 % | 0.7 % |
+| requant | 0.1 % | 4.8 % |
+| softmax | 0.5 % | 0.5 % |
 
-**kv260 shakespeare W8 prefill, all fixes** (3384k cycles, T=256)
+**kv260 shakespeare W8 prefill, all fixes** (3400k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 0.0 % | 19.7 % |
+| dma weights | 0.0 % | 19.6 % |
 | dma params | 0.0 % | 0.7 % |
-| gemm linear | 79.0 % | 78.7 % |
+| gemm linear | 78.6 % | 78.3 % |
 | gemm attn | 6.7 % | 6.5 % |
-| requant | 1.1 % | 15.0 % |
-| ln | 2.8 % | 2.8 % |
-| softmax | 6.7 % | 6.7 % |
+| requant | 1.1 % | 14.8 % |
+| ln | 3.1 % | 3.1 % |
+| softmax | 6.9 % | 6.9 % |
 | gelu | 1.1 % | 1.1 % |
 | vec add | 1.1 % | 1.1 % |
 | kv append | 1.1 % | 1.1 % |
 
-**kv260 shakespeare W4 decode, as built** (422k cycles per token)
+**kv260 shakespeare W4 decode, as built** (421k cycles per token)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 57.4 % | 85.0 % |
-| dma params | 6.0 % | 6.3 % |
-| gemm linear | 30.8 % | 81.3 % |
-| gemm attn | 4.7 % | 4.7 % |
-| requant | 0.2 % | 8.0 % |
-| ln | 0.1 % | 0.8 % |
-| softmax | 0.7 % | 0.8 % |
+| dma weights | 67.0 % | 85.3 % |
+| dma params | 6.3 % | 6.4 % |
+| gemm linear | 21.5 % | 81.6 % |
+| gemm attn | 4.7 % | 4.8 % |
+| requant | 0.1 % | 3.1 % |
+| ln | 0.0 % | 0.6 % |
 
-**kv260 shakespeare W4 prefill, as built** (4382k cycles, T=256)
-
-| op class | critical path | engine busy |
-|---|---|---|
-| dma weights | 0.0 % | 27.2 % |
-| dma params | 0.0 % | 1.2 % |
-| gemm linear | 63.0 % | 63.0 % |
-| gemm attn | 4.7 % | 5.0 % |
-| requant | 5.6 % | 37.4 % |
-| ln | 6.2 % | 6.2 % |
-| softmax | 11.3 % | 11.3 % |
-| gelu | 3.4 % | 3.4 % |
-| vec add | 3.4 % | 3.4 % |
-| kv append | 2.1 % | 2.1 % |
-
-**kv260 shakespeare W4 decode, all fixes** (207k cycles per token)
+**kv260 shakespeare W4 prefill, as built** (3686k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 10.5 % | 83.1 % |
-| dma params | 3.3 % | 5.6 % |
-| gemm linear | 79.0 % | 85.4 % |
-| gemm attn | 5.0 % | 4.8 % |
-| requant | 0.4 % | 6.6 % |
-| softmax | 1.1 % | 1.3 % |
+| dma weights | 0.0 % | 32.4 % |
+| dma params | 0.0 % | 1.5 % |
+| gemm linear | 77.6 % | 74.9 % |
+| gemm attn | 6.6 % | 6.0 % |
+| requant | 0.5 % | 12.7 % |
+| ln | 3.8 % | 3.8 % |
+| softmax | 7.9 % | 7.9 % |
+| gelu | 1.0 % | 1.0 % |
+| vec add | 1.0 % | 1.0 % |
+| kv append | 1.0 % | 1.0 % |
 
-**kv260 shakespeare W4 prefill, all fixes** (3362k cycles, T=256)
+**kv260 shakespeare W4 decode, all fixes** (206k cycles per token)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 0.0 % | 17.0 % |
+| dma weights | 10.5 % | 83.5 % |
+| dma params | 3.4 % | 5.6 % |
+| gemm linear | 79.4 % | 85.8 % |
+| gemm attn | 5.0 % | 4.9 % |
+| requant | 0.4 % | 6.3 % |
+| softmax | 0.8 % | 0.9 % |
+
+**kv260 shakespeare W4 prefill, all fixes** (3378k cycles, T=256)
+
+| op class | critical path | engine busy |
+|---|---|---|
+| dma weights | 0.0 % | 16.9 % |
 | dma params | 0.0 % | 0.7 % |
-| gemm linear | 79.3 % | 79.2 % |
-| gemm attn | 6.8 % | 6.6 % |
-| requant | 0.7 % | 14.0 % |
-| ln | 2.8 % | 2.8 % |
-| softmax | 6.8 % | 6.8 % |
+| gemm linear | 78.9 % | 78.8 % |
+| gemm attn | 6.7 % | 6.5 % |
+| requant | 0.7 % | 13.9 % |
+| ln | 3.1 % | 3.1 % |
+| softmax | 6.9 % | 6.9 % |
 | gelu | 1.1 % | 1.1 % |
 | vec add | 1.1 % | 1.1 % |
 | kv append | 1.1 % | 1.1 % |
@@ -111,24 +110,24 @@ Critical-path share and engine occupancy per op class (`python3 bench/roofline.p
 | dma weights | 91.1 % | 91.1 % |
 | dma params | 3.2 % | 3.2 % |
 | dma act/kv | 5.1 % | 5.5 % |
-| gemm linear | 0.4 % | 43.8 % |
+| gemm linear | 0.4 % | 43.9 % |
 | gemm attn | 0.1 % | 2.5 % |
-| requant | 0.0 % | 3.1 % |
+| requant | 0.0 % | 1.7 % |
 
-**pynq-z2 shakespeare W8 prefill, as built** (13604k cycles, T=256)
+**pynq-z2 shakespeare W8 prefill, as built** (13221k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 3.4 % | 81.3 % |
-| dma params | 0.2 % | 2.9 % |
-| dma act/kv | 2.8 % | 7.5 % |
-| gemm linear | 77.7 % | 78.3 % |
-| gemm attn | 5.8 % | 5.5 % |
-| requant | 0.6 % | 14.7 % |
-| ln | 2.7 % | 2.9 % |
-| softmax | 4.6 % | 4.6 % |
+| dma weights | 3.6 % | 83.7 % |
+| dma params | 0.2 % | 3.0 % |
+| dma act/kv | 2.9 % | 7.7 % |
+| gemm linear | 80.0 % | 80.5 % |
+| gemm attn | 6.0 % | 5.6 % |
+| requant | 0.2 % | 5.7 % |
+| ln | 2.2 % | 2.4 % |
+| softmax | 3.2 % | 3.3 % |
 | gelu | 1.1 % | 1.1 % |
-| vec add | 1.1 % | 1.1 % |
+| vec add | 0.6 % | 0.6 % |
 
 **pynq-z2 shakespeare W8 decode, all fixes** (1167k cycles per token)
 
@@ -141,7 +140,7 @@ Critical-path share and engine occupancy per op class (`python3 bench/roofline.p
 | gemm attn | 0.1 % | 1.7 % |
 | requant | 0.0 % | 2.3 % |
 
-**pynq-z2 shakespeare W8 prefill, all fixes** (12392k cycles, T=256)
+**pynq-z2 shakespeare W8 prefill, all fixes** (12389k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
@@ -150,7 +149,7 @@ Critical-path share and engine occupancy per op class (`python3 bench/roofline.p
 | dma act/kv | 2.7 % | 6.6 % |
 | gemm linear | 84.8 % | 85.9 % |
 | gemm attn | 5.7 % | 5.5 % |
-| requant | 0.2 % | 6.2 % |
+| requant | 0.2 % | 6.1 % |
 | ln | 1.7 % | 1.8 % |
 | softmax | 2.8 % | 2.8 % |
 | gelu | 1.2 % | 1.2 % |
@@ -165,22 +164,22 @@ Critical-path share and engine occupancy per op class (`python3 bench/roofline.p
 | dma act/kv | 9.0 % | 9.7 % |
 | gemm linear | 52.3 % | 82.3 % |
 | gemm attn | 0.2 % | 4.5 % |
-| requant | 0.1 % | 4.4 % |
+| requant | 0.0 % | 2.1 % |
 
-**pynq-z2 shakespeare W4 prefill, as built** (13217k cycles, T=256)
+**pynq-z2 shakespeare W4 prefill, as built** (12822k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
-| dma weights | 0.2 % | 43.0 % |
-| dma params | 0.2 % | 3.0 % |
-| dma act/kv | 0.9 % | 7.7 % |
-| gemm linear | 82.3 % | 80.6 % |
-| gemm attn | 5.9 % | 5.6 % |
-| requant | 0.8 % | 14.0 % |
-| ln | 2.7 % | 3.0 % |
-| softmax | 4.7 % | 4.7 % |
-| gelu | 1.1 % | 1.1 % |
-| vec add | 1.1 % | 1.1 % |
+| dma weights | 0.2 % | 44.4 % |
+| dma params | 0.2 % | 3.1 % |
+| dma act/kv | 3.0 % | 8.0 % |
+| gemm linear | 82.8 % | 83.0 % |
+| gemm attn | 6.2 % | 5.8 % |
+| requant | 0.2 % | 4.7 % |
+| ln | 2.3 % | 2.5 % |
+| softmax | 3.3 % | 3.4 % |
+| gelu | 1.2 % | 1.2 % |
+| vec add | 0.6 % | 0.6 % |
 
 **pynq-z2 shakespeare W4 decode, all fixes** (655k cycles per token)
 
@@ -189,21 +188,21 @@ Critical-path share and engine occupancy per op class (`python3 bench/roofline.p
 | dma weights | 83.5 % | 84.1 % |
 | dma params | 5.6 % | 5.6 % |
 | dma act/kv | 9.1 % | 9.2 % |
-| gemm linear | 1.5 % | 57.1 % |
+| gemm linear | 1.5 % | 57.2 % |
 | gemm attn | 0.1 % | 2.9 % |
-| requant | 0.0 % | 2.8 % |
+| requant | 0.0 % | 2.7 % |
 
-**pynq-z2 shakespeare W4 prefill, all fixes** (12317k cycles, T=256)
+**pynq-z2 shakespeare W4 prefill, all fixes** (12314k cycles, T=256)
 
 | op class | critical path | engine busy |
 |---|---|---|
 | dma weights | 0.2 % | 35.8 % |
 | dma params | 0.2 % | 2.4 % |
 | dma act/kv | 0.8 % | 6.6 % |
-| gemm linear | 86.6 % | 86.4 % |
+| gemm linear | 86.6 % | 86.5 % |
 | gemm attn | 5.7 % | 5.5 % |
-| requant | 0.3 % | 5.0 % |
+| requant | 0.3 % | 4.9 % |
 | ln | 1.7 % | 1.8 % |
-| softmax | 2.8 % | 2.9 % |
+| softmax | 2.8 % | 2.8 % |
 | gelu | 1.2 % | 1.2 % |
 | vec add | 0.6 % | 0.6 % |

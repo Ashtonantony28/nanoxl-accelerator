@@ -167,7 +167,7 @@ KV260, an AXI SmartConnect merges `mf` and `md` onto one HP port, or they go to 
 | 0x068/6C/70 | PERF_BUSY_DMA/ARR/VEC | RO | cycles with at least one command outstanding at that engine |
 | 0x074 | PERF_RETIRED | RO | commands completed (engine commands at done, WAIT/SIGNAL at grant, IRQ/END at execution) |
 | 0x078/7C | PERF_BYTES_LO/HI | RO | DMA bytes moved (64-bit) |
-| 0x080+4i | SAT_i | RO | `sat_cnt[32i+31:32i]` input ports (i < NSAT = 4): requant / ALU / LN saturation counters wired by SG7 |
+| 0x080+4i | SAT_i | RO | `sat_cnt[32i+31:32i]` (i < NSAT = 5), 32-bit saturating event counters of the VEC engine in the canonical order of `vec_seq.sat_cnt`: SAT_0 requant (REQUANT), SAT_1 ALU (VEC, incl. the residual add), SAT_2 LN out (LN affine clamp), SAT_3 LN z (LN normalize clamp), SAT_4 softmax score (SOFTMAX_ONLINE score requant). `nanoxl_top` wires `vec_seq.sat_cnt` straight through; `nanoxl/driver/csr.py` `SAT_NAMES` and the SimBackend use the same slots (AUDIT-1 A1-02). PERF_CTRL bit 1 clears them |
 
 Host sequence: set RING_BASE, RING_SIZE and IRQ_EN; write words at index tail and onward; write
 DOORBELL = new tail; on END (IRQ bit 0, or END_COUNT) clear the status with W1C.

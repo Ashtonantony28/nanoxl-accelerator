@@ -19,7 +19,7 @@
 //
 // Wiring contract (docs/top.md §2): DMA writes into PBUF are snooped into the VEC engine's
 // parameter residency (pb_snoop_*); ctrl_top eng_clr resets both engines; sat_clr clears the
-// VEC engine's counters; SAT_0..4 = {requant + softmax score, ALU, LN z, LN out, softmax score}.
+// VEC engine's counters; SAT_0..4 = {requant, ALU, LN out, LN z, softmax score} (= vec_seq order).
 module nanoxl_top #(
     parameter int N          = 8,          // systolic array N x N
     parameter int L          = 4,          // vector lanes
@@ -236,16 +236,9 @@ module nanoxl_top #(
         .sat_clr(sat_clr), .sat_cnt(vec_sat),
         .st_hits(st_hits), .st_misses(st_misses), .st_lines(st_lines));
 
-    // saturation counters -> CSR SAT_0..4 (driver order: requant, ALU, LN z, LN out; + score).
-    // vec_sat = {score, LN z, LN out, ALU, requant}. SAT_0 also counts the softmax score requant,
-    // as nanoxl.driver.SimBackend does (both are requant clamps); SAT_4 has the score alone.
-    logic [32:0] rq_sum;
-    assign rq_sum  = {1'b0, vec_sat[0 +: 32]} + {1'b0, vec_sat[4*32 +: 32]};
-    assign sat_cnt = {vec_sat[4*32 +: 32],                    // SAT_4 softmax score
-                      vec_sat[2*32 +: 32],                    // SAT_3 LN out
-                      vec_sat[3*32 +: 32],                    // SAT_2 LN z
-                      vec_sat[1*32 +: 32],                    // SAT_1 ALU
-                      rq_sum[32] ? 32'hFFFF_FFFF : rq_sum[31:0]};  // SAT_0 requant + score
+    // saturation counters -> CSR SAT_0..4 in the canonical order of vec_seq.sat_cnt (AUDIT-1 A1-02):
+    // 0 requant, 1 ALU, 2 LN out, 3 LN z, 4 softmax score (docs/control.md §5, nanoxl/driver/csr.py)
+    assign sat_cnt = vec_sat;
 
     // ---------------------------------------------------------------- scratchpad router
     logic [NR-1:0]          rq_v, rq_r, rs_v;

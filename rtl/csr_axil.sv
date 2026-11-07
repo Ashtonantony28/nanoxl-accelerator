@@ -6,7 +6,7 @@
 // Writes to read-only or unmapped addresses are ignored (OKAY); unmapped reads return 0.
 module csr_axil #(
     parameter int PW   = 24,
-    parameter int NSAT = 4
+    parameter int NSAT = 5
 ) (
     input  logic                 clk,
     input  logic                 rst_n,

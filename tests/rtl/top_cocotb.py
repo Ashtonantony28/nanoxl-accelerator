@@ -41,7 +41,6 @@ ROOT = Path(__file__).resolve().parents[2]
 TINY = ROOT / "artifacts" / "models" / "tiny"
 REF = json.loads((TINY / "golden_ref.json").read_text())
 PHYS = 0x5000_0000             # driver buffer (image built at 0x4000_0000: relocation exercised)
-SAT4 = R.SAT_BASE + 16         # SAT_4: softmax score requant (nanoxl_top)
 
 
 def env(name, default):
@@ -271,7 +270,6 @@ async def top_tiny(dut):
         res["golden_sat"] = dict(g.sat_count)
         res["host_sat"] = dict(dev.host_sat)
         res["csr_sat"] = dev.saturation()
-        res["csr_sat"]["score"] = be.read32(SAT4)
         res["err"] = be.read32(R.ERR_CODE)
         res["status"] = be.read32(R.STATUS)
         res["n_csr"] = be.n_csr
@@ -294,7 +292,7 @@ async def top_tiny(dut):
         assert all(sat.get(k) for k in ("h0.c_attn", "h0.attn_proj", "h0.score", "h0.pv", "resid", "h0.ln_1")), sat
     cs = res["csr_sat"]
     last = mon.snaps[-1] if mon.snaps else [0] * 5
-    tot = {"requant": last[0] + last[4], "alu": last[1], "ln_z": last[3], "ln_out": last[2], "score": last[4]}
+    tot = dict(zip(R.SAT_NAMES, last))       # SAT_i == vec_seq.sat_cnt[i] (A1-02 canonical map)
     assert cs == tot, (cs, tot)
 
     if ref_tokens is not None:

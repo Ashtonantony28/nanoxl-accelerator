@@ -47,8 +47,8 @@ print(codec.decode(toks), dev.perf(), dev.saturation())
 * `sample(logits, top_k, temperature, rng, scale)`. Greedy is argmax with ties going to the lowest
   index, which is the golden model's rule. Top-k computes softmax(`scale · logit / T`) over the k
   largest logits, with `scale` = the bundle's `scales.logits`.
-* `perf()` reads PERF_CYCLES / BUSY_* / RETIRED / BYTES. `saturation()` reads SAT_0..3
-  (requant, ALU, LN z, LN out). `clear_counters()` writes PERF_CTRL = 3. `last_perf` holds the
+* `perf()` reads PERF_CYCLES / BUSY_* / RETIRED / BYTES. `saturation()` reads SAT_0..4
+  (requant, ALU, LN out, LN z, softmax score; docs/control.md §5). `clear_counters()` writes PERF_CTRL = 3. `last_perf` holds the
   counter deltas of the last step.
 
 CLI:
@@ -91,7 +91,7 @@ CSR semantics follow docs/control.md §1 and §5:
   DBG_LAST holds the ring index of the last dispatched word. SEM_SEL / SEM_VAL read one semaphore.
 * **Counters.** PERF_RETIRED counts every word. PERF_BYTES counts DMA bytes. PERF_CYCLES and
   PERF_BUSY_DMA/ARR/VEC come from `cyclemodel.simulate` over the words dispatched since the queues were
-  last idle, so they are modelled, not measured. SAT_0..3 are the funcsim saturation events per unit,
+  last idle, so they are modelled, not measured. SAT_0..4 are the funcsim saturation events per unit (requant, ALU, LN out, LN z, softmax score: the RTL slot order),
   32-bit saturating. PERF_CTRL bit 0 clears the perf counters, and bit 1 clears the SAT counters.
 
 Not emulated: AXI timing and fetch errors from RRESP, queue overflow (STATUS bit 15), and the soft-reset

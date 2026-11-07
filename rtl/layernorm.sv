@@ -232,12 +232,13 @@ module layernorm #(
     generate
         for (j = 0; j < L; j++) begin : g_lane
             // this lane's g and b, selected out of the stage-A words
-            wire [4:0] gp = goffA + 5'(j);
-            wire [4:0] bp = boffA + 5'(j);
-            wire [127:0] gwl = gw_A[gp / 5'd8];
-            wire [127:0] bwl = bw_A[bp / 5'd4];
-            wire signed [15:0] gA = gwl[(gp % 5'd8) * 16 +: 16];
-            wire signed [31:0] bA = bwl[(bp % 5'd4) * 32 +: 32];
+            // 8-bit lane positions: 5 bits wrapped for j >= 32 (L = 64 fix, SG7b)
+            wire [7:0] gp = 8'(goffA) + 8'(j);
+            wire [7:0] bp = 8'(boffA) + 8'(j);
+            wire [127:0] gwl = gw_A[gp / 8'd8];
+            wire [127:0] bwl = bw_A[bp / 8'd4];
+            wire signed [15:0] gA = gwl[(gp % 8'd8) * 16 +: 16];
+            wire signed [31:0] bA = bwl[(bp % 8'd4) * 32 +: 32];
             logic signed [15:0] gB, gC, gD;
             logic signed [31:0] bB, bC, bD;
             always_ff @(posedge clk) begin

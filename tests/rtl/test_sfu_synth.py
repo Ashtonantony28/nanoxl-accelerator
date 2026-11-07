@@ -13,12 +13,13 @@ ROOT = Path(__file__).resolve().parents[2]
 PRIMS = ["rtl/lut_rom.sv", "rtl/sfu_exp2.sv", "rtl/sfu_recip.sv", "rtl/sfu_rsqrt.sv"]
 DEPS = {
     "sfu_elem": (PRIMS + ["rtl/sfu_elem.sv"], {"L": 4, "NG": 4}),
-    "softmax": (PRIMS + ["rtl/softmax.sv"], {"L": 4, "CTX_MAX": 256}),
+    "softmax": (PRIMS + ["rtl/srdhm.sv", "rtl/sat_counter.sv", "rtl/requant.sv", "rtl/softmax.sv"],
+                {"L": 4, "CTX_MAX": 256, "NCTX": 4}),
     "layernorm": (PRIMS + ["rtl/srdhm.sv", "rtl/sat_counter.sv", "rtl/layernorm.sv"],
                   {"L": 4, "D_MAX": 384, "NSLOT": 1}),
-    "sfu": (PRIMS + ["rtl/sfu_elem.sv", "rtl/softmax.sv", "rtl/srdhm.sv", "rtl/sat_counter.sv",
-                     "rtl/layernorm.sv", "rtl/sfu.sv"],
-            {"L": 4, "CTX_MAX": 256, "D_MAX": 384, "NG": 4, "NSLOT": 1}),
+    "sfu": (PRIMS + ["rtl/sfu_elem.sv", "rtl/srdhm.sv", "rtl/sat_counter.sv", "rtl/requant.sv",
+                     "rtl/softmax.sv", "rtl/layernorm.sv", "rtl/sfu.sv"],
+            {"L": 4, "CTX_MAX": 256, "D_MAX": 384, "NG": 4, "NSLOT": 1, "NCTX": 4}),
 }
 
 
@@ -39,7 +40,7 @@ def synth(top):
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="yosys not installed")
-@pytest.mark.parametrize("top", ["sfu_elem",
+@pytest.mark.parametrize("top", [pytest.param("sfu_elem", marks=pytest.mark.slow),
                                  pytest.param("softmax", marks=pytest.mark.slow),
                                  pytest.param("layernorm", marks=pytest.mark.slow),
                                  pytest.param("sfu", marks=pytest.mark.slow)])

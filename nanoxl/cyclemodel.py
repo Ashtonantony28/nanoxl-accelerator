@@ -92,6 +92,8 @@ def _cd(a, b):
 #   rq_chunk, rq_row  REQUANT fixed cycles per column chunk (<= RQ_MAX) and per row of a chunk
 #   ln, sm            (H, Hw, f, F): input lines hidden behind the previous row beyond one beat,
 #                     output lines hidden, fixed cycles per row, fixed cycles per command
+VEC_MUL_CYC = 7       # vec_alu cycles per VEC MUL beat at shamt 0 (rtl/vec_alu.sv)
+
 VEC_CAL = {
     1: {
         4: dict(vec=13, gelu=21, kv=12, rq_chunk=25, rq_row=1, ln=(0, 0, 18, 17), sm=(0, 0, 18, 17)),
@@ -284,8 +286,12 @@ def _vec_cost(c, hw, tm, resident):
     if op == "VEC":
         eb = max(isa.DT_BYTES[f["dt_in"]], isa.DT_BYTES[f["dt_out"]])
         n, occ = f["len"], cal["vec"]
+        # VEC MUL (never emitted by the compiler): the multi-cycle vec_alu multiplier takes
+        # VEC_MUL_CYC cycles per beat (shamt 0; docs/vector-unit.md §3, SG11c); not calibrated
+        mul = f["vop"] == isa.VOPS["MUL"]
         for c0 in range(0, max(n, 1), VEC_CH):
-            occ += 1 + stream(min(VEC_CH, n - c0), eb)
+            k = min(VEC_CH, n - c0)
+            occ += 1 + max(stream(k, eb), VEC_MUL_CYC * _cd(k, L) if mul else 0)
         return occ, tm.vec_latency
     if op == "GELU":
         n, occ = f["len"], cal["gelu"]

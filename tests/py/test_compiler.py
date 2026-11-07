@@ -192,3 +192,54 @@ def test_compiler_sync_regression_shadow_growth():
     s = sb.stream()
     assert [c.op for c in s] == ["KV_APPEND", "SIGNAL", "WAIT", "GEMM", "END"]
     check_hazards(s)
+
+
+def test_compiler_alignment_rule_and_w4_group_panels():
+    """Alignment rule (docs/isa.md §3): panels split at lcm(N_array, 16) along K and N, W4A8 panels start
+    on a group boundary and carry their scale rows; the sync builder refuses an unaligned command."""
+    from nanoxl.compiler import SyncBuilder
+    from nanoxl.graph import Graph, Op
+    g = Graph({"a": (8, 200), "y": (8, 150)}, [Op("linear", ["a"], ["y"], "fc", {"wbits": 4})], ["a"], ["y"])
+    p = make_synthetic_params(g, 3)
+    for na in (4, 8, 32):
+        hw = KV260.with_(array_n=na, wbuf=2 * KiB * (1 + (na == 32)), panel_bytes=KiB * (1 + (na == 32)))
+        comp = Compiler(g, p, hw, max_rows=8)
+        plan = comp.lin["fc"]
+        assert plan.wbits == 4 and plan.group == 64 and isa.gs_group(plan.glog2) == 64
+        for pn in plan.panels:
+            assert pn.k0 % 64 == 0 and pn.n0 % 16 == 0 and pn.ntp % 2 == 0
+            assert pn.nbytes == isa.gs_layout(pn.kc, pn.ntp, plan.glog2)[2] <= hw.wbuf // 2
+        assert len({pn.k0 for pn in plan.panels}) > 1            # K really split (at group boundaries)
+        prog = comp.compile_step([(0, 8)])
+        isa.encode_stream(prog.cmds, aligned=True)
+        assert any(c.op == "GEMM_GS" and c["accumulate"] for c in prog.cmds)
+    sb = SyncBuilder(0)
+    with pytest.raises(isa.IsaError):
+        sb.emit(isa.C("GEMM", a_addr=8, M=1, N=16, K=16))
+    with pytest.raises(CompileError):
+        relocate(prog.cmds, 8)
+
+
+def test_compiler_from_bundle_graph():
+    """graph.from_bundle maps the ADR-002 bundle onto the compiler graph: golden names, INT4 unpacked
+    with group scales, int16 logits, real LN parameter blocks in the DDR image."""
+    from pathlib import Path
+    from nanoxl import numerics as nx
+    from nanoxl.export import load_bundle
+    from nanoxl.funcsim import ln_block_layout
+    from nanoxl.graph import from_bundle
+    root = Path(__file__).resolve().parents[2] / "artifacts" / "models" / "tiny"
+    A, meta = load_bundle(root / "w4a8.npz")
+    g, p = from_bundle(A, meta, "tiny-w4a8")
+    assert g.cfg.wbits == 4 and g.tensors["logits"] == (16, 65) and g.tensors["x"] == (16, 128)
+    assert p["h0.c_fc"]["wbits"] == 4 and p["h0.c_fc"]["gm"].shape == (2, 512) and p["lm_head"]["wbits"] == 8
+    assert np.array_equal(nx.pack_i4(p["h1.mlp_proj"]["w"]), A["h1.mlp_proj.w4"])
+    comp = Compiler(g, p, KV260)
+    addr, n = comp.blob["h0.ln_1"]
+    assert n == ln_block_layout(128)[2]
+    blob = dict(comp.img.chunks)[addr - comp.img.base]
+    assert np.frombuffer(blob[:16], np.int32).tolist() == [int(v) for v in A["h0.ln_1.c"][[0, 1, 2, 4]]]
+    assert np.frombuffer(blob[16:24], np.int64)[0] == A["h0.ln_1.c"][3]
+    assert {op.param for op in g.ops if op.kind == "attn"} == {f"h{l}.attn" for l in range(4)}
+    with pytest.raises(ValueError):
+        from_bundle(A, dict(meta, quant=dict(meta["quant"], res_bits=8)))

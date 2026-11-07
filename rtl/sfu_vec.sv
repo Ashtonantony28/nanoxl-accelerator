@@ -1,7 +1,8 @@
 // sfu_vec.sv -- vector unit with the C5 SFU block attached to its hook: vec_unit
 // (HAS_SFU = 1) and sfu wired port group to port group, as docs/vector-unit.md §5.6
 // prescribes. vec_unit itself is unchanged. Opcodes 0x18-0x1F reach the SFU with sub-op
-// = cmd_op[2:0] and imm = cmd_imm_b (GELU table slot / LayerNorm slot); see docs/sfu.md.
+// = cmd_op[2:0] and imm = cmd_imm_b (table / LN / score-record slot, softmax causal
+// limit); see docs/sfu.md.
 module sfu_vec #(
     parameter int L       = 4,
     parameter int RW      = 16,
@@ -9,7 +10,8 @@ module sfu_vec #(
     parameter int CTX_MAX = 256,
     parameter int D_MAX   = 384,
     parameter int NG      = 4,
-    parameter int NSLOT   = 16
+    parameter int NSLOT   = 16,
+    parameter int NCTX    = 8
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -48,11 +50,15 @@ module sfu_vec #(
     output logic [31:0]      r_min,
     output logic             r_sq_err,
     input  logic             cfg_we,
-    input  logic [31:0]      cfg_addr,
-    input  logic [63:0]      cfg_wdata,
+    input  logic [3:0]       cfg_region,
+    input  logic [7:0]       cfg_slot,
+    input  logic [11:0]      cfg_line,
+    input  logic [12:0]      cfg_cols,
+    input  logic [127:0]     cfg_data,
     input  logic             stat_clr,
     output logic [31:0]      rq_sat_count,
     output logic [31:0]      alu_sat_count,
+    output logic [31:0]      sm_sat_count,
     output logic [31:0]      ln_z_sat_count,
     output logic [31:0]      ln_out_sat_count,
     output logic             sat_sticky,
@@ -89,15 +95,16 @@ module sfu_vec #(
         .sat_sticky(v_sticky), .illegal_op(v_illegal), .busy(v_busy)
     );
 
-    sfu #(.L(L), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX), .NG(NG), .NSLOT(NSLOT)) u_sfu (
+    sfu #(.L(L), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX), .NG(NG), .NSLOT(NSLOT), .NCTX(NCTX)) u_sfu (
         .clk(clk), .rst_n(rst_n),
         .in_valid(si_valid), .in_ready(si_ready), .in_op(si_op), .in_fmt(si_fmt),
         .in_shamt(si_shamt), .in_imm(si_imm), .in_data(si_data), .in_keep(si_keep),
         .in_last(si_last),
         .out_valid(so_valid), .out_ready(so_ready), .out_data(so_data), .out_keep(so_keep),
         .out_last(so_last),
-        .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_wdata(cfg_wdata),
-        .stat_clr(stat_clr), .ln_z_sat_count(ln_z_sat_count),
+        .cfg_we(cfg_we), .cfg_region(cfg_region), .cfg_slot(cfg_slot), .cfg_line(cfg_line),
+        .cfg_cols(cfg_cols), .cfg_data(cfg_data),
+        .stat_clr(stat_clr), .sm_sat_count(sm_sat_count), .ln_z_sat_count(ln_z_sat_count),
         .ln_out_sat_count(ln_out_sat_count), .sat_sticky(s_sticky), .illegal_op(s_illegal),
         .err_len(sfu_err_len), .busy(s_busy)
     );

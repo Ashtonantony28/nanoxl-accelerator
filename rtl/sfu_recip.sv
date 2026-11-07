@@ -19,8 +19,8 @@ module sfu_recip #(
     output logic [16:0]   y,
     output logic [5:0]    b,
     input  logic          lut_we,
-    input  logic [7:0]    lut_waddr,
-    input  logic [15:0]   lut_wdata
+    input  logic [4:0]    lut_waddr,    // table line: entries 8*line .. 8*line+7
+    input  logic [127:0]   lut_wdata
 );
     function automatic logic [5:0] bitlen(input logic [SW-1:0] x);
         bitlen = '0;
@@ -40,7 +40,7 @@ module sfu_recip #(
     logic [32:0] t3;
     logic [48:0] p4;
 
-    lut_rom #(.DW(16), .AW(8)) u_lut (
+    lut_rom #(.DW(16), .AW(8), .WN(8)) u_lut (
         .clk(clk), .we(lut_we), .waddr(lut_waddr), .wdata(lut_wdata),
         .en(en), .raddr(m1[14:7]), .rdata(y0)
     );

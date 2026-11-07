@@ -20,8 +20,8 @@ module sfu_rsqrt #(
     output logic signed [21:0]  y,
     output logic signed [7:0]   k,
     input  logic                lut_we,
-    input  logic [7:0]          lut_waddr,
-    input  logic [15:0]         lut_wdata
+    input  logic [4:0]          lut_waddr,    // table line: entries 8*line .. 8*line+7
+    input  logic [127:0]         lut_wdata
 );
     function automatic logic [6:0] bitlen(input logic [QW-1:0] x);
         bitlen = '0;
@@ -48,7 +48,7 @@ module sfu_rsqrt #(
     logic [33:0]        mt;
     logic [31:0]        yy;
 
-    lut_rom #(.DW(16), .AW(8)) u_lut (
+    lut_rom #(.DW(16), .AW(8), .WN(8)) u_lut (
         .clk(clk), .we(lut_we), .waddr(lut_waddr), .wdata(lut_wdata),
         .en(en), .raddr(m1[15:8]), .rdata(y0)
     );

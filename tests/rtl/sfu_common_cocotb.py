@@ -19,14 +19,10 @@ BUNDLE = ROOT / os.environ.get("SFU_BUNDLE", "artifacts/models/tiny/w8a8.npz")
 I64 = np.int64
 
 # sub-op codes on the vec_unit SFU hook (cmd_op = 0x18 + sub-op), docs/sfu.md
-OP_EXP2, OP_RECIP, OP_RSQRT, OP_GELU, OP_SOFTMAX, OP_LN = range(6)
+OP_EXP2, OP_RECIP, OP_RSQRT, OP_GELU, OP_SOFTMAX, OP_LN, OP_SOFTMAX_RQ = range(7)
 
-# sfu.sv configuration address map: addr = region << 24 | slot << 16 | index
-R_EXP2, R_RECIP, R_RSQRT, R_GELU, R_LN_GB, R_LN_C = range(6)
-
-
-def cfg_addr(region, slot, index):
-    return (region << 24) | (slot << 16) | index
+# sfu.sv configuration regions (one 16-byte PBUF line per write, docs/sfu.md §2)
+R_EXP2, R_RECIP, R_RSQRT, R_GELU, R_LN, R_CTX = range(6)
 
 
 _BUNDLE_CACHE = {}
@@ -51,6 +47,18 @@ def ln_slots():
     A, meta = bundle()
     names = [f"h{l}.{n}" for l in range(meta["n_layer"]) for n in ("ln_1", "ln_2")] + ["ln_f"]
     return [(n, A[n + ".g"], A[n + ".b"], [int(v) for v in A[n + ".c"]]) for n in names]
+
+
+def to_lines(raw: bytes):
+    """Split a PBUF byte block into 16-byte lines, each as a little-endian 128-bit int."""
+    raw = bytes(raw) + bytes(-len(raw) % 16)
+    return [int.from_bytes(raw[i:i + 16], "little") for i in range(0, len(raw), 16)]
+
+
+def table_lines(t):
+    """SFU table (uint16[256], LUT_LOAD layout) or GELU table (int8[256]) as PBUF lines."""
+    t = np.asarray(t)
+    return to_lines((t.astype(np.uint16) if t.dtype == np.uint16 else t.astype(np.int8)).tobytes())
 
 
 def s32(v):

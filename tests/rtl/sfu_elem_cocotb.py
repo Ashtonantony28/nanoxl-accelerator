@@ -10,7 +10,7 @@ import cocotb
 import numpy as np
 from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
-from sfu_common_cocotb import (OP_EXP2, OP_GELU, OP_RECIP, OP_RSQRT, Sink, Source, bundle_luts,
+from sfu_common_cocotb import (OP_EXP2, OP_GELU, OP_RECIP, OP_RSQRT, Sink, Source, bundle_luts, table_lines,
                                env_int, pack, ref_elem, run_bench, start, u, unpack, write_port)
 
 L = env_int("L", 4)
@@ -24,9 +24,9 @@ INPUTS = ["in_valid", "in_op", "in_slot", "in_data", "in_keep", "in_last", "out_
 async def load_tables(dut, exp_lut, recip_lut, rsqrt_lut, gelu):
     w = []
     for bit, t in ((0, exp_lut), (1, recip_lut), (2, rsqrt_lut)):
-        w += [(1 << bit, i, int(t[i])) for i in range(256)]
+        w += [(1 << bit, i, ln) for i, ln in enumerate(table_lines(np.asarray(t, np.uint16)))]
     for s, t in enumerate(gelu):
-        w += [(8, (s << 8) | i, int(t[i]) & 0xFF) for i in range(256)]
+        w += [(8, (s << 4) | i, ln) for i, ln in enumerate(table_lines(np.asarray(t, np.int8)))]
     await write_port(dut, w, "lut_we", "lut_waddr", "lut_wdata")
 
 

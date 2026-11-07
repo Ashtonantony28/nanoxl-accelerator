@@ -1,34 +1,40 @@
 // sfu.sv -- special-function block for the vector unit's SFU hook (docs/vector-unit.md
-// §5.6, docs/sfu.md). Implements the C5 nonlinear ops of ADR-002 bit-exactly.
+// §5.6, docs/sfu.md). Implements the C5 nonlinear ops of ADR-002 bit-exactly and takes its
+// tables and parameters in the PBUF layouts of docs/isa.md §3 (ADR-004).
 //
 //   sub-op (cmd_op = 0x18 + sub-op)   unit        lane in            lane out
 //   0 EXP2      elementwise            sfu_elem    d uint16           e Q.15
 //   1 RECIP     elementwise            sfu_elem    S uint32           {b, y} packed
 //   2 RSQRT     elementwise            sfu_elem    Q uint32           {k, y} packed
-//   3 GELU      elementwise            sfu_elem    int8 (imm = table slot = layer)  int8
+//   3 GELU      elementwise            sfu_elem    int8 (imm[7:0] = table slot)  int8
 //   4 SOFTMAX   row (len <= CTX_MAX)   softmax     int16 Q.8 logits   p int8 [0,127]
-//   5 LN        row (len <= D_MAX)     layernorm   int16 (imm = LN slot)            int8
-//   6, 7        reserved: data passed through unchanged, sticky illegal_op
+//   5 LN        row (len <= D_MAX)     layernorm   int16 (imm[7:0] = LN slot)    int8
+//   6 SOFTMAX_RQ row                   softmax     int32 scores, requantized with the score
+//                                                  record of slot imm[7:0] (SOFTMAX_ONLINE)
+//   7           reserved: data passed through unchanged, sticky illegal_op
+//   Softmax rows: imm[31:16] = number of visible (causal) columns, 0 = all.
 // Hook rules met: one output beat per input beat, in order, keep/last unchanged. A row is
 // the run of beats ending in in_last; in_op and in_imm are constant over a row. Up to
 // RECQ rows may be in flight across the three units; the output mux follows a queue of
 // the unit of each row, so rows leave in arrival order. in_ready depends combinationally
 // on out_ready (through the elementwise pipeline's stall) and never on in_valid.
 //
-// Configuration write port (tables and LN parameters are model-bundle data, written while
-// the unit is idle; address = region << 24 | slot << 16 | index):
-//   region 0 lut.exp2[index]   1 lut.recip[index]   2 lut.rsqrt[index]   (wdata[15:0])
-//   region 3 h{slot}.gelu.lut[index]                                       (wdata[7:0])
-//   region 4 LN slot: g[index] = wdata[15:0], b[index] = wdata[47:16]
-//   region 5 LN slot: .c[index] (index 0..4 = mu_mult, mu_shift, sqrt_d, eps_q, sh), wdata[47:0]
-// Status: LayerNorm saturation counters (z and out), sticky flags, err_len (a softmax or
-// LN row longer than its buffer), busy.
+// Configuration port: one 16-byte PBUF line per write (cfg_data, little-endian), written
+// while the unit is idle:
+//   region 0/1/2  LUT_LOAD table 0 exp2 / 1 recip / 2 rsqrt, cfg_line 0..31 (8 x uint16)
+//   region 3      GELU table of slot cfg_slot (PBUF GELU LUT), cfg_line 0..15 (16 x int8)
+//   region 4      LN parameter block of slot cfg_slot, cfg_line = line of the block,
+//                 cfg_cols = the block's cols (header, g int16[cols], b int32[cols])
+//   region 5      softmax ctx = score record {bias, mult, shift, ls} of slot cfg_slot
+// Status: score (softmax requant), LayerNorm z and out saturation counters, sticky flag,
+// err_len (a softmax or LN row longer than its buffer), illegal_op, busy.
 module sfu #(
     parameter int L       = 4,
     parameter int CTX_MAX = 256,
     parameter int D_MAX   = 384,
     parameter int NG      = 4,
-    parameter int NSLOT   = 16
+    parameter int NSLOT   = 16,
+    parameter int NCTX    = 8
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -47,9 +53,13 @@ module sfu #(
     output logic [L-1:0]    out_keep,
     output logic            out_last,
     input  logic            cfg_we,
-    input  logic [31:0]     cfg_addr,
-    input  logic [63:0]     cfg_wdata,
+    input  logic [3:0]      cfg_region,
+    input  logic [7:0]      cfg_slot,
+    input  logic [11:0]     cfg_line,
+    input  logic [12:0]     cfg_cols,
+    input  logic [127:0]    cfg_data,
     input  logic            stat_clr,
+    output logic [31:0]     sm_sat_count,
     output logic [31:0]     ln_z_sat_count,
     output logic [31:0]     ln_out_sat_count,
     output logic            sat_sticky,
@@ -61,32 +71,34 @@ module sfu #(
     localparam int RECQ = 4;
 
     function automatic logic [1:0] unit_of(input logic [2:0] op);
-        unit_of = (op == 3'd4) ? U_SM : (op == 3'd5) ? U_LN : U_EL;
+        unit_of = (op == 3'd4 || op == 3'd6) ? U_SM : (op == 3'd5) ? U_LN : U_EL;
     endfunction
 
     // ---------------- configuration decode (registered) ----------------
-    logic [3:0]  cw_region;
-    logic        cw_we;
-    logic [7:0]  cw_slot;
-    logic [15:0] cw_idx;
-    logic [63:0] cw_data;
+    logic [3:0]   cw_region;
+    logic         cw_we;
+    logic [7:0]   cw_slot;
+    logic [11:0]  cw_line;
+    logic [12:0]  cw_cols;
+    logic [127:0] cw_data;
     always_ff @(posedge clk) begin
         if (!rst_n) cw_we <= 1'b0;
         else        cw_we <= cfg_we;
-        cw_region <= cfg_addr[27:24];
-        cw_slot   <= cfg_addr[23:16];
-        cw_idx    <= cfg_addr[15:0];
-        cw_data   <= cfg_wdata;
+        cw_region <= cfg_region;
+        cw_slot   <= cfg_slot;
+        cw_line   <= cfg_line;
+        cw_cols   <= cfg_cols;
+        cw_data   <= cfg_data;
     end
     logic [3:0] el_we;
     logic [1:0] sm_we;
-    logic       ln_lut_we, ln_par_we, ln_c_we;
+    logic       ln_lut_we, ln_blk_we, sm_ctx_we;
     always_comb begin
         el_we     = '0;
         sm_we     = '0;
         ln_lut_we = 1'b0;
-        ln_par_we = cw_we && cw_region == 4'd4;
-        ln_c_we   = cw_we && cw_region == 4'd5;
+        ln_blk_we = cw_we && cw_region == 4'd4;
+        sm_ctx_we = cw_we && cw_region == 4'd5;
         if (cw_we) begin
             case (cw_region)
                 4'd0: begin el_we[0] = 1'b1; sm_we[0] = 1'b1; end
@@ -97,8 +109,8 @@ module sfu #(
             endcase
         end
     end
-    logic [15:0] el_waddr;
-    assign el_waddr = (cw_region == 4'd3) ? {cw_slot, cw_idx[7:0]} : {8'd0, cw_idx[7:0]};
+    logic [11:0] el_waddr;
+    assign el_waddr = (cw_region == 4'd3) ? {cw_slot, cw_line[3:0]} : {7'd0, cw_line[4:0]};
 
     // ---------------- input routing ----------------
     logic [1:0] sel;
@@ -138,16 +150,20 @@ module sfu #(
         .in_last(in_last),
         .out_valid(el_out_valid), .out_ready(el_out_ready), .out_data(el_out_data),
         .out_keep(el_out_keep), .out_last(el_out_last),
-        .lut_we(el_we), .lut_waddr(el_waddr), .lut_wdata(cw_data[15:0])
+        .lut_we(el_we), .lut_waddr(el_waddr), .lut_wdata(cw_data)
     );
 
-    softmax #(.L(L), .CTX_MAX(CTX_MAX)) u_sm (
+    logic sm_sticky;
+    softmax #(.L(L), .CTX_MAX(CTX_MAX), .NCTX(NCTX)) u_sm (
         .clk(clk), .rst_n(rst_n),
         .in_valid(in_valid && in_ready && sel == U_SM), .in_ready(sm_in_ready),
         .in_data(in_data), .in_keep(in_keep), .in_last(in_last),
+        .in_rq(in_op == 3'd6), .in_slot(in_imm[7:0]), .in_nkeep(in_imm[31:16]),
         .out_valid(sm_out_valid), .out_ready(sm_out_ready), .out_data(sm_out_data),
         .out_keep(sm_out_keep), .out_last(sm_out_last),
-        .lut_we(sm_we), .lut_waddr(cw_idx[7:0]), .lut_wdata(cw_data[15:0]),
+        .lut_we(sm_we), .lut_waddr(cw_line[4:0]), .lut_wdata(cw_data),
+        .ctx_we(sm_ctx_we), .ctx_slot(cw_slot), .ctx_data(cw_data),
+        .sat_clr(stat_clr), .sat_count(sm_sat_count), .sat_sticky(sm_sticky),
         .busy(sm_busy), .err_len(sm_err)
     );
 
@@ -158,10 +174,9 @@ module sfu #(
         .in_slot(in_imm[7:0]), .in_data(in_data), .in_keep(in_keep), .in_last(in_last),
         .out_valid(ln_out_valid), .out_ready(ln_out_ready), .out_data(ln_out_data),
         .out_keep(ln_out_keep), .out_last(ln_out_last),
-        .lut_we(ln_lut_we), .lut_waddr(cw_idx[7:0]), .lut_wdata(cw_data[15:0]),
-        .par_we(ln_par_we), .par_slot(cw_slot), .par_idx(cw_idx), .par_g(cw_data[15:0]),
-        .par_b(cw_data[47:16]),
-        .c_we(ln_c_we), .c_slot(cw_slot), .c_idx(cw_idx[2:0]), .c_data(cw_data[47:0]),
+        .lut_we(ln_lut_we), .lut_waddr(cw_line[4:0]), .lut_wdata(cw_data),
+        .blk_we(ln_blk_we), .blk_slot(cw_slot), .blk_line(cw_line), .blk_cols(cw_cols),
+        .blk_data(cw_data),
         .sat_clr(stat_clr), .z_sat_count(ln_z_sat_count), .out_sat_count(ln_out_sat_count),
         .sat_sticky(ln_sticky), .busy(ln_busy), .err_len(ln_err)
     );
@@ -207,13 +222,13 @@ module sfu #(
     // ---------------- status ----------------
     always_ff @(posedge clk) begin
         if (!rst_n) illegal_op <= 1'b0;
-        else illegal_op <= (stat_clr ? 1'b0 : illegal_op) | (push && in_op[2:1] == 2'b11);
+        else illegal_op <= (stat_clr ? 1'b0 : illegal_op) | (push && in_op == 3'd7);
     end
-    assign sat_sticky = ln_sticky;
+    assign sat_sticky = ln_sticky | sm_sticky;
     assign err_len    = sm_err | ln_err;
     assign busy       = !rq_empty || mid || sm_busy || ln_busy;
 
     // in_fmt / in_shamt are not used by any C5 op (kept for hook compatibility).
     logic unused;
-    assign unused = ^{in_fmt, in_shamt, in_imm[31:8]};
+    assign unused = ^{in_fmt, in_shamt, in_imm[15:8]};
 endmodule

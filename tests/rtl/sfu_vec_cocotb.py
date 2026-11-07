@@ -12,10 +12,13 @@ from cocotb.triggers import FallingEdge, ReadOnly
 
 from nanoxl import numerics as nx
 from nanoxl import vec_ref as vr
-from sfu_common_cocotb import (OP_EXP2, OP_GELU, OP_LN, OP_RECIP, OP_RSQRT, OP_SOFTMAX, R_EXP2,
-                               R_GELU, R_LN_C, R_LN_GB, R_RECIP, R_RSQRT, Sink, Source,
-                               bundle_luts, cfg_addr, env_int, ln_ref, ln_slots, pack, ref_elem,
-                               run_bench, softmax_ref, start, u, unpack)
+from nanoxl.funcsim import ln_block
+from nanoxl.graph import requant_ref
+from sfu_common_cocotb import (OP_EXP2, OP_GELU, OP_LN, OP_RECIP, OP_RSQRT, OP_SOFTMAX,
+                               OP_SOFTMAX_RQ, R_CTX, R_EXP2, R_GELU, R_LN, R_RECIP, R_RSQRT, Sink,
+                               Source, bundle, bundle_luts, env_int, ln_ref, ln_slots, pack,
+                               ref_elem, run_bench, softmax_ref, start, table_lines, to_lines, u,
+                               unpack)
 
 L = env_int("L", 4)
 N_CMDS = env_int("N_CMDS", 150)
@@ -23,30 +26,43 @@ ACC_W = vr.REDUCE_ACC_W
 M32 = 0xFFFFFFFF
 INPUTS = ["cmd_valid", "cmd_op", "cmd_len", "cmd_fmt", "cmd_shamt", "cmd_lo", "cmd_hi",
           "cmd_b_imm", "cmd_imm_b", "cmd_p_imm", "cmd_mult", "a_valid", "a_data", "b_valid",
-          "b_data", "p_valid", "p_mult", "p_shift", "d_ready", "r_ready", "cfg_we", "cfg_addr",
-          "cfg_wdata", "stat_clr"]
+          "b_data", "p_valid", "p_mult", "p_shift", "d_ready", "r_ready", "cfg_we", "cfg_region",
+          "cfg_slot", "cfg_line", "cfg_cols", "cfg_data", "stat_clr"]
+
+
+def score_records():
+    """The bundle's per-layer score records {bias = 0, mult, shift, ls} (PBUF softmax ctx)."""
+    A, meta = bundle()
+    return [(0, int(A[f"h{l}.score.mult"][0]), int(A[f"h{l}.score.shift"][0]),
+             int(A[f"h{l}.score.ls"][0])) for l in range(meta["n_layer"])]
 
 
 async def load_cfg(dut):
+    """Everything the SFU needs, as PBUF lines: the LUT_LOAD tables, the per-layer GELU
+    tables, the LN parameter blocks (nanoxl.funcsim.ln_block) and the score records."""
     exp_lut, recip_lut, rsqrt_lut, gel = bundle_luts()
-    w = []
+    w = []   # (region, slot, line, cols, data)
     for reg, t in ((R_EXP2, exp_lut), (R_RECIP, recip_lut), (R_RSQRT, rsqrt_lut)):
-        w += [(cfg_addr(reg, 0, i), int(t[i])) for i in range(256)]
+        w += [(reg, 0, i, 0, ln) for i, ln in enumerate(table_lines(t))]
     for s, t in enumerate(gel):
-        w += [(cfg_addr(R_GELU, s, i), int(t[i]) & 0xFF) for i in range(256)]
+        w += [(R_GELU, s, i, 0, ln) for i, ln in enumerate(table_lines(t))]
     for s, (_, g, b, c) in enumerate(ln_slots()):
-        w += [(cfg_addr(R_LN_GB, s, i), (int(g[i]) & 0xFFFF) | ((int(b[i]) & M32) << 16))
-              for i in range(len(g))]
-        w += [(cfg_addr(R_LN_C, s, k), int(c[k])) for k in range(5)]
-    for a, d in w:
+        w += [(R_LN, s, i, len(g), ln) for i, ln in enumerate(to_lines(ln_block(c, g, b)))]
+    for s, r in enumerate(score_records()):
+        w += [(R_CTX, s, 0, 0, to_lines(np.array(r, np.int32).tobytes())[0])]
+    for reg, s, i, cols, d in w:
         await FallingEdge(dut.clk)
         dut.cfg_we.value = 1
-        dut.cfg_addr.value = a
-        dut.cfg_wdata.value = d
+        dut.cfg_region.value = reg
+        dut.cfg_slot.value = s
+        dut.cfg_line.value = i
+        dut.cfg_cols.value = cols
+        dut.cfg_data.value = d
     await FallingEdge(dut.clk)
     dut.cfg_we.value = 0
     for _ in range(3):
         await FallingEdge(dut.clk)
+    return len(w)
 
 
 def rand_val(rng):
@@ -61,8 +77,8 @@ def rand_val(rng):
 def rand_cmd(rng):
     n_ln = len(ln_slots())
     d = len(ln_slots()[0][1])
-    ops = [0, 1, 3, 7, 9, vr.VOP_REQUANT, vr.VOP_REDUCE] + [0x18 + k for k in range(7)] + \
-        [0x18 + OP_SOFTMAX, 0x18 + OP_LN, 0x18 + OP_GELU]
+    ops = [0, 1, 3, 7, 9, vr.VOP_REQUANT, vr.VOP_REDUCE] + [0x18 + k for k in range(8)] + \
+        [0x18 + OP_SOFTMAX, 0x18 + OP_SOFTMAX_RQ, 0x18 + OP_LN, 0x18 + OP_GELU]
     op = rng.choice(ops)
     sub = op - 0x18 if op >= 0x18 else None
     r = rng.random()
@@ -74,6 +90,9 @@ def rand_cmd(rng):
         imm = rng.randrange(n_ln)
     if sub == OP_GELU:
         imm = rng.randrange(4)
+    if sub in (OP_SOFTMAX, OP_SOFTMAX_RQ):
+        nk = rng.randrange(1, n + 1) if n and rng.random() < 0.5 else 0
+        imm = (nk << 16) | rng.randrange(len(score_records()))
     lo, hi = sorted(rng.randrange(-500, 500) for _ in range(2))
     return {"op": op, "len": n, "fmt": rng.randrange(4), "shamt": rng.randrange(32), "lo": lo,
             "hi": hi, "b_imm": int(rng.random() < 0.3), "imm_b": imm,
@@ -89,6 +108,10 @@ def sfu_row(sub, n, rng):
         return [rng.randrange(0, 1 << rng.randrange(1, 32)) for _ in range(n)]
     if sub == OP_GELU:
         return [rng.randrange(-128, 128) for _ in range(n)]
+    if sub == OP_SOFTMAX_RQ:
+        c = rng.randrange(-(1 << 16), 1 << 16)
+        return [c + rng.randrange(-(1 << 14), 1 << 14) if rng.random() < 0.9 else
+                rng.randrange(-(1 << 31), 1 << 31) for _ in range(n)]
     if sub == OP_SOFTMAX:
         sig = rng.choice([50, 500, 3000])
         return [int(max(-32768, min(32767, round(rng.gauss(0, sig))))) for _ in range(n)]
@@ -102,7 +125,7 @@ def build(cmds, rng):
     exp_lut, recip_lut, rsqrt_lut, gel = bundle_luts()
     slots = ln_slots()
     a, b, p, d, r = [], [], [], [], []
-    cnt = dict(alu=0, rq=0, z=0, o=0, illegal=0)
+    cnt = dict(alu=0, rq=0, z=0, o=0, sm=0, illegal=0)
     for c in cmds:
         n, op = c["len"], c["op"]
         if n == 0:
@@ -139,8 +162,16 @@ def build(cmds, rng):
             x = (np.array(row_a, np.int64) + np.array(row_b, np.int64) + (1 << 31)) % (1 << 32) - (1 << 31)
             y = nx.rdivpot(nx.srdhm(x, mult), shift).astype(np.int64)
             cnt["rq"] += int(((y < -(1 << (bits - 1))) | (y > (1 << (bits - 1)) - 1)).sum())
-        elif sub == OP_SOFTMAX:
-            out = softmax_ref(row_a, np.ones(n, bool))
+        elif sub in (OP_SOFTMAX, OP_SOFTMAX_RQ):
+            nk, slot = c["imm_b"] >> 16, c["imm_b"] & 0xFF
+            s16 = np.array(row_a, np.int64)
+            if sub == OP_SOFTMAX_RQ:
+                bias, mult, shift, ls = score_records()[slot]
+                cc = {}
+                s16 = requant_ref(s16, mult, shift, bias, 16, cc, "score", ls).astype(np.int64)
+                cnt["sm"] += cc["score"]
+            mask = np.arange(n) < (nk if nk else n)
+            out = softmax_ref(s16, mask)
         elif sub == OP_LN:
             _, g, bb, cc = slots[c["imm_b"]]
             out, nz, no = ln_ref(np.array(row_a), g[:n], bb[:n], cc, rsqrt_lut)
@@ -208,6 +239,7 @@ async def run_cmds(dut, cmds, rng, p_src, p_snk):
     assert dut.sfu_err_len.value == 0
     assert u(dut.alu_sat_count) == cnt["alu"] and u(dut.rq_sat_count) == cnt["rq"]
     assert (u(dut.ln_z_sat_count), u(dut.ln_out_sat_count)) == (cnt["z"], cnt["o"])
+    assert u(dut.sm_sat_count) == cnt["sm"]
     assert dut.illegal_op.value == cnt["illegal"]
     await FallingEdge(dut.clk)
     return cnt
@@ -232,7 +264,8 @@ async def sfu_vec_layer_rows(dut):
     """A decoder-layer-like sequence: LN (every bundle slot), GELU (every table), softmax
     rows of every length 1..CTX in a stride, back to back with no gaps."""
     await start(dut, INPUTS)
-    await load_cfg(dut)
+    n_lines = await load_cfg(dut)
+    dut._log.info(f"cfg load of the tiny bundle: {n_lines} line writes")
     rng = random.Random(77)
     d = len(ln_slots()[0][1])
     base = dict(fmt=1, shamt=0, lo=0, hi=0, b_imm=1, p_imm=1, mult=1 << 30)
@@ -241,5 +274,6 @@ async def sfu_vec_layer_rows(dut):
         cmds.append(dict(base, op=0x18 + OP_LN, len=d, imm_b=s))
         cmds.append(dict(base, op=0x18 + OP_GELU, len=4 * d, imm_b=s % 4))
         cmds.append(dict(base, op=0x18 + OP_SOFTMAX, len=1 + 29 * s, imm_b=0))
+        cmds.append(dict(base, op=0x18 + OP_SOFTMAX_RQ, len=128, imm_b=((s * 14 + 1) << 16) | (s % 4)))
     cmds.append(dict(base, op=0x18 + OP_SOFTMAX, len=256, imm_b=0))
     await run_cmds(dut, cmds, rng, 1.0, 1.0)

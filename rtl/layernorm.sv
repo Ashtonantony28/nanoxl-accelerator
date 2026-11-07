@@ -3,7 +3,8 @@
 //
 // Input: int16 residual values x_i (sign-extended in int32 lanes; low 16 bits used),
 // L-lane beats ending with in_last; in_slot selects the LayerNorm instance (constants and
-// per-channel g/b, loaded through the parameter ports). Lanes with keep = 0 are excluded
+// per-channel g/b, written line by line from the ISA LN parameter block on blk_*; L must be
+// a power of two). Lanes with keep = 0 are excluded
 // from every sum and return 0 (in the model every element of a row is kept).
 //   pass 1 (while streaming in): S = sum x                       (int32), row buffered
 //            mu = rdivpot(srdhm(S, mu_mult), mu_shift)           (C2 primitives)
@@ -43,21 +44,18 @@ module layernorm #(
     output logic [L*32-1:0] out_data,
     output logic [L-1:0]    out_keep,
     output logic            out_last,
-    // rsqrt table
+    // rsqrt table, one PBUF line (8 uint16 entries) per write
     input  logic            lut_we,
-    input  logic [7:0]      lut_waddr,
-    input  logic [15:0]     lut_wdata,
-    // per-channel affine parameters: element par_idx of slot par_slot
-    input  logic            par_we,
-    input  logic [7:0]      par_slot,
-    input  logic [15:0]     par_idx,
-    input  logic [15:0]     par_g,
-    input  logic [31:0]     par_b,
-    // constants .c = [mu_mult, mu_shift, sqrt_d, eps_q, sh] (c_idx 0..4) of slot c_slot
-    input  logic            c_we,
-    input  logic [7:0]      c_slot,
-    input  logic [2:0]      c_idx,
-    input  logic [47:0]     c_data,
+    input  logic [4:0]      lut_waddr,
+    input  logic [127:0]    lut_wdata,
+    // LN parameter block (docs/isa.md §3, funcsim.ln_block), one 16-byte line per write:
+    // line 0 int32 {mu_mult, mu_shift, sqrt_d, sh}; line 1 int64 eps_q; lines 2 .. 2+G-1
+    // g int16 (8 per line), then b int32 (4 per line); G = ceil(cols/8). blk_cols = cols.
+    input  logic            blk_we,
+    input  logic [7:0]      blk_slot,
+    input  logic [11:0]     blk_line,
+    input  logic [12:0]     blk_cols,
+    input  logic [127:0]    blk_data,
     // status
     input  logic            sat_clr,
     output logic [31:0]     z_sat_count,
@@ -69,8 +67,17 @@ module layernorm #(
     localparam int NB  = (D_MAX + L - 1) / L;
     localparam int BAW = (NB > 1) ? $clog2(NB) : 1;
     localparam int SLW = (NSLOT > 1) ? $clog2(NSLOT) : 1;
-    localparam int PAW = $clog2(NSLOT * NB + 1);
     localparam int CW  = 16;
+    // g/b storage: words of GW g's (NGB banks of one 8-entry line) and BW b's (NBB banks
+    // of one 4-entry line); a beat's L lanes always lie inside one word (L a power of two).
+    localparam int GW  = (L > 8) ? L : 8;
+    localparam int BW  = (L > 4) ? L : 4;
+    localparam int NGB = GW / 8;
+    localparam int NBB = BW / 4;
+    localparam int WG  = (D_MAX + GW - 1) / GW;     // g words per slot
+    localparam int WB  = (D_MAX + BW - 1) / BW;     // b words per slot
+    localparam int GAW = $clog2(NSLOT * WG + 1);
+    localparam int BAW2 = $clog2(NSLOT * WB + 1);
 
     typedef enum logic [2:0] {S_IN, S_MU, S_P2, S_RS, S_P3} state_t;
     state_t st;
@@ -81,17 +88,29 @@ module layernorm #(
     logic [16:0] k_sqrtd [NSLOT];
     logic [47:0] k_eps   [NSLOT];
     logic [4:0]  k_sh    [NSLOT];
+    // block-line decode
+    logic [11:0] ng_lines, nb_lines, lg, lb;
+    logic        w_ok, w_hdr0, w_hdr1, w_g, w_b;
+    always_comb begin
+        ng_lines = 12'((blk_cols + 13'd7) >> 3);
+        nb_lines = 12'((blk_cols + 13'd3) >> 2);
+        lg       = blk_line - 12'd2;
+        lb       = blk_line - 12'd2 - ng_lines;
+        w_ok     = blk_we && blk_slot < 8'(NSLOT);
+        w_hdr0   = w_ok && blk_line == 12'd0;
+        w_hdr1   = w_ok && blk_line == 12'd1;
+        w_g      = w_ok && blk_line >= 12'd2 && lg < ng_lines && 32'(lg) < 32'(WG * NGB);
+        w_b      = w_ok && blk_line >= 12'd2 + ng_lines && lb < nb_lines &&
+                   32'(lb) < 32'(WB * NBB);
+    end
     always_ff @(posedge clk) begin
-        if (c_we && c_slot < 8'(NSLOT)) begin
-            case (c_idx)
-                3'd0: k_mult [c_slot[SLW-1:0]] <= c_data[31:0];
-                3'd1: k_mush [c_slot[SLW-1:0]] <= c_data[4:0];
-                3'd2: k_sqrtd[c_slot[SLW-1:0]] <= c_data[16:0];
-                3'd3: k_eps  [c_slot[SLW-1:0]] <= c_data[47:0];
-                3'd4: k_sh   [c_slot[SLW-1:0]] <= c_data[4:0];
-                default: ;
-            endcase
+        if (w_hdr0) begin
+            k_mult [blk_slot[SLW-1:0]] <= blk_data[31:0];
+            k_mush [blk_slot[SLW-1:0]] <= blk_data[36:32];
+            k_sqrtd[blk_slot[SLW-1:0]] <= blk_data[80:64];
+            k_sh   [blk_slot[SLW-1:0]] <= blk_data[100:96];
         end
+        if (w_hdr1) k_eps[blk_slot[SLW-1:0]] <= blk_data[47:0];
     end
 
     // ---------------- input pass ----------------
@@ -144,8 +163,41 @@ module layernorm #(
     assign issue     = en && issuing;
     assign out_valid = vF;
 
-    logic [PAW-1:0] paddr_r;
-    assign paddr_r = PAW'(slot) * PAW'(NB) + PAW'(rcnt[BAW-1:0]);
+    // g/b read address of the beat being issued
+    logic [31:0]     e0;
+    logic [GAW-1:0]  gaddr_r;
+    logic [BAW2-1:0] baddr_r;
+    assign e0      = 32'(rcnt) * 32'(L);
+    assign gaddr_r = GAW'(slot) * GAW'(WG) + GAW'(e0 / 32'(GW));
+    assign baddr_r = BAW2'(slot) * BAW2'(WB) + BAW2'(e0 / 32'(BW));
+    logic [127:0] gw_A [NGB];          // stage A: the g / b words of the beat
+    logic [127:0] bw_A [NBB];
+    logic [4:0]   goffA, boffA;        // lane-0 position inside the words (L < 8 / L < 4)
+    genvar k;
+    generate
+        for (k = 0; k < NGB; k++) begin : g_gbank
+            logic [127:0] mem [NSLOT * WG];
+            wire  [GAW-1:0] wa = GAW'(blk_slot[SLW-1:0]) * GAW'(WG) + GAW'(lg / 12'(NGB));
+            always_ff @(posedge clk) begin
+                if (w_g && (lg % 12'(NGB)) == 12'(k)) mem[wa] <= blk_data;
+                if (en) gw_A[k] <= mem[gaddr_r];
+            end
+        end
+        for (k = 0; k < NBB; k++) begin : g_bbank
+            logic [127:0] mem [NSLOT * WB];
+            wire  [BAW2-1:0] wa = BAW2'(blk_slot[SLW-1:0]) * BAW2'(WB) + BAW2'(lb / 12'(NBB));
+            always_ff @(posedge clk) begin
+                if (w_b && (lb % 12'(NBB)) == 12'(k)) mem[wa] <= blk_data;
+                if (en) bw_A[k] <= mem[baddr_r];
+            end
+        end
+    endgenerate
+    always_ff @(posedge clk) begin
+        if (en) begin
+            goffA <= 5'(e0 % 32'(GW));
+            boffA <= 5'(e0 % 32'(BW));
+        end
+    end
 
     always_ff @(posedge clk) begin
         if (en) begin
@@ -179,23 +231,17 @@ module layernorm #(
     genvar j;
     generate
         for (j = 0; j < L; j++) begin : g_lane
-            // per-lane g/b memory: entry slot*NB + beat
-            logic [15:0] gmem [NSLOT * NB];
-            logic [31:0] bmem [NSLOT * NB];
-            wire  [PAW-1:0] paddr_w = PAW'(par_slot[SLW-1:0]) * PAW'(NB) + PAW'(par_idx / 16'(L));
-            always_ff @(posedge clk) begin
-                if (par_we && (par_idx % 16'(L)) == 16'(j) && par_slot < 8'(NSLOT) &&
-                    par_idx < 16'(NB * L)) begin
-                    gmem[paddr_w] <= par_g;
-                    bmem[paddr_w] <= par_b;
-                end
-            end
-            logic signed [15:0] gA, gB, gC, gD;
-            logic signed [31:0] bA, bB, bC, bD;
+            // this lane's g and b, selected out of the stage-A words
+            wire [4:0] gp = goffA + 5'(j);
+            wire [4:0] bp = boffA + 5'(j);
+            wire [127:0] gwl = gw_A[gp / 5'd8];
+            wire [127:0] bwl = bw_A[bp / 5'd4];
+            wire signed [15:0] gA = gwl[(gp % 5'd8) * 16 +: 16];
+            wire signed [31:0] bA = bwl[(bp % 5'd4) * 32 +: 32];
+            logic signed [15:0] gB, gC, gD;
+            logic signed [31:0] bB, bC, bD;
             always_ff @(posedge clk) begin
                 if (en) begin
-                    gA <= gmem[paddr_r];
-                    bA <= bmem[paddr_r];
                     gB <= gA; bB <= bA; gC <= gB; bC <= bB; gD <= gC; bD <= bC;
                 end
             end

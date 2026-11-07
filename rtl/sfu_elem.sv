@@ -9,8 +9,9 @@
 // Lanes with keep = 0 return 0. keep/last travel with the beat. `slot` (GELU table, one
 // per layer) is a per-beat input like op, so beats of different rows can share the pipe.
 //
-// Tables are loaded at run time (lut_we one-hot: [0] exp2, [1] recip, [2] rsqrt, [3] GELU;
-// lut_waddr = entry for exp2/recip/rsqrt, {slot, entry} for GELU). Write them while idle.
+// Tables are loaded at run time, one 16-byte PBUF line per write (docs/isa.md §3): lut_we
+// one-hot [0] exp2, [1] recip, [2] rsqrt (line 0..31 = 8 uint16 entries, little-endian), [3]
+// GELU (lut_waddr = {slot, line 0..15}, 16 int8 entries). Write them while idle.
 //
 // Pipeline: 6 stages, 1 beat per cycle, whole-pipeline stall (in_ready = !out_valid ||
 // out_ready). Each primitive is fed from the tap of the input delay line that makes all
@@ -35,8 +36,8 @@ module sfu_elem #(
     output logic [L-1:0]    out_keep,
     output logic            out_last,
     input  logic [3:0]      lut_we,
-    input  logic [15:0]     lut_waddr,
-    input  logic [15:0]     lut_wdata
+    input  logic [11:0]     lut_waddr,
+    input  logic [127:0]    lut_wdata
 );
     localparam int D   = 6;
     localparam int GSW = (NG > 1) ? $clog2(NG) : 1;
@@ -93,18 +94,18 @@ module sfu_elem #(
             end
             sfu_rsqrt #(.QW(32)) u_rsqrt (
                 .clk(clk), .en(adv), .q(x0), .y(qy_l[j]), .k(qk_l[j]),
-                .lut_we(lut_we[2]), .lut_waddr(lut_waddr[7:0]), .lut_wdata(lut_wdata)
+                .lut_we(lut_we[2]), .lut_waddr(lut_waddr[4:0]), .lut_wdata(lut_wdata)
             );
             sfu_recip #(.SW(32)) u_recip (
                 .clk(clk), .en(adv), .s(x1), .y(ry_l[j]), .b(rb_l[j]),
-                .lut_we(lut_we[1]), .lut_waddr(lut_waddr[7:0]), .lut_wdata(lut_wdata)
+                .lut_we(lut_we[1]), .lut_waddr(lut_waddr[4:0]), .lut_wdata(lut_wdata)
             );
             sfu_exp2 u_exp2 (
                 .clk(clk), .en(adv), .d(x3[15:0]), .e(e_l[j]),
-                .lut_we(lut_we[0]), .lut_waddr(lut_waddr[7:0]), .lut_wdata(lut_wdata)
+                .lut_we(lut_we[0]), .lut_waddr(lut_waddr[4:0]), .lut_wdata(lut_wdata)
             );
-            lut_rom #(.DW(8), .AW(GAW)) u_gelu (
-                .clk(clk), .we(lut_we[3]), .waddr(lut_waddr[GAW-1:0]), .wdata(lut_wdata[7:0]),
+            lut_rom #(.DW(8), .AW(GAW), .WN(16)) u_gelu (
+                .clk(clk), .we(lut_we[3]), .waddr(lut_waddr[GAW-5:0]), .wdata(lut_wdata),
                 .en(adv), .raddr({slot_p[4], x4[7:0]}), .rdata(g_l[j])
             );
         end

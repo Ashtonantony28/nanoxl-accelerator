@@ -13,12 +13,12 @@ module sfu_exp2 (
     input  logic [15:0] d,
     output logic [15:0] e,
     input  logic        lut_we,
-    input  logic [7:0]  lut_waddr,
-    input  logic [15:0] lut_wdata
+    input  logic [4:0]  lut_waddr,    // table line: entries 8*line .. 8*line+7
+    input  logic [127:0] lut_wdata
 );
     logic [15:0] lv;
     logic [7:0]  q1;
-    lut_rom #(.DW(16), .AW(8)) u_lut (
+    lut_rom #(.DW(16), .AW(8), .WN(8)) u_lut (
         .clk(clk), .we(lut_we), .waddr(lut_waddr), .wdata(lut_wdata),
         .en(en), .raddr(d[7:0]), .rdata(lv)
     );

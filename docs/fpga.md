@@ -22,7 +22,7 @@ Pinned versions this was written for:
 | `fpga/boards.py` | **single source of truth**: `nanoxl_top` parameters per board, clock, part, CSR base, device capacities, and `hwconfig(board)`, the `HwConfig` the compiler must use with that bitstream |
 | `fpga/kv260/build.tcl`, `fpga/pynqz2/build.tcl` | Vivado project + block design + synth/impl/bitstream + reports + overlay export |
 | `fpga/common/nanoxl_build.tcl`, `fpga/common/rtl_files.tcl` | shared procs (argument parsing, project, core cell, address mapping, run/report/export) and the RTL list |
-| `fpga/kv260/nanoxl_kv260.xdc`, `fpga/pynqz2/nanoxl_pynqz2.xdc` | `RAM_STYLE` for the scratchpad banks (URAM on the KV260); clocks come from the PS IP |
+| `fpga/kv260/nanoxl_kv260.xdc`, `fpga/pynqz2/nanoxl_pynqz2.xdc` | board constraints (none needed today: the scratchpad bank primitive is the `RAM_STYLE` parameter of `nanoxl_top`, SG11b); clocks come from the PS IP |
 | `fpga/yosys/estimate.py`, `fpga/yosys/prep.py`, `fpga/yosys/breakdown.py` | Yosys resource estimates → `bench/results/resources_<board>.json`; `breakdown.py` prints a per-module table (own cells × instances) from a job's `.stat` |
 | `fpga/first_light.py` | first-light checklist (§6), board or emulator |
 | `fpga/run_board.py` | `python3 -m nanoxl.driver` with the as-built `HwConfig` (use this on the board, §4) |
@@ -53,7 +53,7 @@ half of a 4096-deep URAM288, and ABUF + KVBUF alone would need all 64 URAMs. Wit
 KVBUF fit exactly into 64. Cost: the array ACC port (8 lines/beat) then covers every bank, so a VEC read
 of ACC and an array ACC beat in the same cycle always conflict (arbitration still bounds the wait;
 functionally identical, docs/top.md §3). If ACC goes to BRAM instead (64 RAMB36), `NB = 16` is possible
-for ACC only after an RTL change (per-buffer `NB`, change C2 in §2.3).
+for ACC only (`ACC_NB = 16`, per-buffer bank counts since SG11b).
 
 KV260 `shakespeare` with on-chip KV needs 1.18 MB > 1 MiB: run it with `--kv ddr` (ADR-003 batch > 1
 mode; ~5 % slower decode in the model). `tiny` fits on chip on both boards.
@@ -154,9 +154,8 @@ realistic plan is:
   synthesized against black boxes). DSP inference differs: Yosys maps each `$mul` to DSP48E2/E1 tiles on its
   own rules (no 2-MAC INT8 packing, no SIMD); Vivado's mapping of the same RTL will differ in both directions.
 * **URAM:** Yosys infers URAM288 only with `-uram` and only for depth ≥ 2048 lines here (1024-deep banks map
-  to RAMB36). Vivado does **not** infer URAM without `RAM_STYLE = "ultra"`; the KV260 XDC sets it on the
-  ABUF / ACC / KVBUF banks by hierarchical name, which needs global synthesis (the build script sets
-  `synth_checkpoint_mode None`).
+  to RAMB36). Vivado does **not** infer URAM without `ram_style = "ultra"`; `nanoxl_top RAM_STYLE = 2` (KV260)
+  sets it in `spad_bank` on the ABUF / ACC / KVBUF banks (SG11b; the former XDC patterns are gone).
 * `fpga/yosys/prep.py` relabels unnamed `begin` blocks and rewrites `int'(x)` / `signed'(x)` / `~W'(x)`
   casts in synthesis-only copies because Yosys 0.33's SystemVerilog frontend rejects them; the logic is
   unchanged. Vivado reads the original files.
@@ -169,14 +168,14 @@ internal re-implementation the owner's existing tests cover. Estimates are rough
 | # | owner / file | change | saves (KV260) |
 |---|---|---|---|
 | C1 | SG5 `rtl/lut_rom.sv` | store the table as `2^AW / WN` lines of `WN·DW` bits (one write port, one line per LUT_LOAD beat) and select the entry after the registered line read. Today `WN` = 8 / 16 entries are written per cycle into a `DW`-wide array, a multi-write-port memory that no RAM primitive implements, so all 322 tables (exp2 ×128, recip ×65, rsqrt ×65, GELU ×64) become flip-flops plus 256:1 read muxes. As lines they map to LUTRAM (~10 RAM32M16 + a 16-bit 8:1 select, ~120 LUTs per table) | **~2.1 M FF, ~740 k LUT** |
-| C2 | SG7c `rtl/buf_spad.sv` | rewrite the arbitration as `NR` precomputed static priority orders selected by the rotation counter, with per-bank one-hot AND-OR muxes and a barrel rotate per wide port, instead of `(rr + k) % NR` dynamic indices and dynamic part selects (`w_data[p*PMAX*128 +: 128]`, `b_wdata[bank_of(...)]`), which Yosys turns into 32-bit multipliers and shifters (10 DSPs and ~95 k LUTs per buffer, ×5). A crossbar of 8 read / 4 write ports onto 8 banks is ~10-15 k LUTs per buffer. Also: a per-buffer `NB` and a `RAM_STYLE` parameter on `spad_bank` (then the XDC patterns of §1 are not needed) | ~400 k LUT, 50 DSP |
+| C2 | SG7c `rtl/buf_spad.sv` | **done (SG11b).** Arbitration is now NR (NW) static priority chains over a pairwise bank-conflict matrix, selected by the rotation counter; per-bank one-hot AND-OR muxes; one barrel rotate per wide port (writes onto the banks, reads back into address order); no run-time index anywhere. Same grants cycle for cycle (tiny top-level cycle counts unchanged). Per-buffer `ABUF_NB` … `KV_NB` and `RAM_STYLE` (`spad_bank`, set per board in `fpga/boards.py`) replace the XDC RAM patterns. Measured router (banks black-boxed): KV260 95.1 k LUT / 33.1 k MUXF / 10 DSP → 20.1-20.7 k LUT / 3.1-4.3 k MUXF / 0 DSP per buffer; PYNQ-Z2 39.3 k / 10 DSP → 18.0-18.2 k / 0 | **−374 k LUT, −50 DSP** (KV260, ×5); −106 k LUT, −50 DSP (PYNQ-Z2) |
 | C3 | SG5 `rtl/sfu_elem.sv` (+ `sfu_recip`, `sfu_rsqrt`, `sfu_exp2`) | time-multiplex the elementwise RECIP / RSQRT / EXP2 lanes (e.g. 8 per cycle instead of L = 64). The compiler emits **no** elementwise RECIP or RSQRT at all (LN uses one rsqrt per row, softmax one recip per row), so their throughput is irrelevant to every compiled model (ADR-003 lists them as the first reduction) | ~340 DSP, ~25 k LUT |
 | C4 | SG3 `rtl/vec_alu.sv` | VEC `MUL` is a full 64 × 64 product (`a64 * b64`) per lane, combinational before the S1 register, plus a 64-bit variable rounding shift. The compiler emits no VEC MUL; narrow it to 32 × 16 (or one shared multiplier over several cycles) and register the operands | ~200 DSP, ~60 k LUT; fixes a timing path (§5) |
 | C5 | SG2 `rtl/pe.sv` / `systolic_array.sv` | INT8 2-MAC packing in DSP48E2 (two weights × one activation per DSP, Xilinx WP486), as ADR-003 assumed (512 DSPs for N = 32). The systolic pass gives neighbouring PEs the activation one cycle apart, so the packing needs the two PEs of a pair to share one activation register. Alternative without restructuring: `(* use_dsp = "no" *)` on half the PEs (8×8 multiply ≈ 40-60 LUTs: ~25 k LUT for 512 PEs) | 512 DSP |
 | C6 | SG3 `rtl/requant.sv` / SG5 `softmax.sv` | two 64-lane requantizers (VEC REQUANT and the softmax score requant) each with 64 `srdhm` 32 × 32 multipliers (4 DSP48E2 each: 516 DSPs). Share one requantizer between the two users, or run the score requant at fewer lanes | ~260 DSP |
 | C7 | SG3 `rtl/vec_reduce.sv` | split the 64-leaf, 48-bit adder/compare tree (one cycle today) into 2-3 pipeline stages | timing (§5) |
-| C8 | SG7c `rtl/buf_spad.sv` / `spad_bank.sv` | optional second read register (URAM OREG) behind a parameter, with the read latency of the ports raised to 2 (the requesters' credit counters already allow it; the visibility rule of docs/top.md §3 must be re-checked) | timing (§5) |
-| C9 | SG7b `rtl/vec_seq_rd.sv` (and `vec_seq.sv`) | the lane unpack selects each lane's element with `asm_b[(e % AE)*8 +: 8]` per lane and element size: an `AE`-byte mux per lane (×L, ×2 instances). The element offsets of consecutive lanes are consecutive, so a single barrel rotate of the assembly buffer by the start offset followed by fixed wiring per lane gives the same result. Same pattern for `vec_seq`'s own row assembly (44 k LUT at L = 16) | ~35 k LUT at L = 16, ~100 k at L = 64 (estimated) |
+| C8 | SG7c `rtl/buf_spad.sv` / `spad_bank.sv` | **done (SG11b), off by default.** `nanoxl_top` / `buf_spad` / `spad_bank` parameter `OREG` = 1: unconditional second read register (URAM OREG / DOB_REG), read latency 2 on every port and on the null buffer. No requester needed a change; the visibility rule (docs/top.md §3) still holds and the buf_spad bench checks it at latency 2. Cost: +0.2 % cycles on tiny W8A8 (prefill 76,394 → 76,545, 8 decode steps 495,832 → 496,824), so the default stays 0 until timing needs it | timing (§5) |
+| C9 | SG7b `rtl/vec_seq_rd.sv` (and `vec_seq.sv`) | **done (SG11b).** `vec_seq_rd`: one barrel shift of the assembly buffer by `sub << ebl` units of L bytes (log2(16P/L) fixed stages, none at L = 64), then fixed per-lane wiring per element size; chunk writes as a fixed decode. `vec_seq`: the REQUANT record buffer write lines are rotated into slots so every entry has one fixed write source (it was a PL-way mux per bit). Measured: `vec_seq_rd` 11.1 k → 1.06 k LUT (L = 16), 25.3 k → 3.97 k (L = 64), MUXF 6.4 k / 13.8 k → ~0.1 k; `vec_seq` own logic 43.8 k → 7.9 k LUT (L = 16), 44.3 k → 8.4 k (L = 64) | −56 k LUT at L = 16, −78 k at L = 64 (×2 readers + vec_seq) |
 
 With C1-C6 the KV260 estimate drops to roughly 0.54 M LUT, still 4.6× the XCK26; with L = 16 and C1, C2,
 C9 to ~220 k (§2.1 has the table). **The first KV260 bitstream therefore needs L = 16 and probably N = 16,

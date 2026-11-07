@@ -112,8 +112,9 @@ response backpressure):
   request order per port and the requesters' credit counters (≤ 8 / 16 in flight) never overflow. All
   requesters count in-flight beats against their buffer space, so latency 2 needs no change in them
   (`test_top_smoke_oreg`, `test_top_tiny_oreg`); it costs cycles only where a requester waits for read
-  data before its next request (the array's ACC read-modify-write and the DMA's store path), measured
-  below.
+  data before its next request. Measured on tiny W8A8 (N = L = 16, VP = 4, on-chip KV): prefill 76,394 →
+  76,545 cycles, 8 decode steps 495,832 → 496,824 (+0.2 %), so `OREG` defaults to 0. With `OREG` = 0 the
+  re-implemented router grants exactly as before (all tiny cycle counts unchanged).
 * **Visibility.** A write granted at edge *t* is visible to every read granted at an edge > *t*, on
   any port and any port width (array ACC N/4-line beats vs VEC 1-line reads hit the same banks); a
   read granted at the same edge returns the old line. This is the rule array_seq's ACC RMW

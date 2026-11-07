@@ -30,6 +30,7 @@ module nanoxl_top #(
     parameter int PBUF_LINES = 2048,       // 32 KiB
     parameter int KV_LINES   = 8192,       // 128 KiB
     parameter int NB         = 0,          // banks per buffer; 0 = 2 x widest port (power of two)
+    parameter int VP         = 4,          // VEC engine port beat in 16-byte lines (A, B, P, D); 1 or 4
     parameter int AW         = 32,
     parameter int CTX_MAX    = 256,
     parameter int D_MAX      = 384,
@@ -120,15 +121,16 @@ module nanoxl_top #(
     localparam int WPL  = (N + 15) / 16;              // array W port lines per beat
     localparam int CPL  = (N >= 4) ? N / 4 : 1;       // array ACC port lines per beat (one int32 row)
     localparam int PM0  = (APL > CPL) ? APL : CPL;
-    localparam int PMAX = (PM0 > WPL) ? PM0 : WPL;
+    localparam int PM1  = (PM0 > WPL) ? PM0 : WPL;
+    localparam int PMAX = (PM1 > VP) ? PM1 : VP;
     localparam int NBA  = (NB > 0) ? NB : ((PMAX <= 1) ? 2 : (PMAX <= 2) ? 4 : (PMAX <= 4) ? 8 : 16);
     localparam int NSAT = 5;
 
     // read ports: 0 DMA, 1 array A, 2 array W, 3 array ACC, 4 VEC A, 5 VEC B, 6 VEC P
     // write ports: 0 DMA, 1 array ACC, 2 VEC D
     localparam int NR = 7, NW = 3;
-    localparam logic [NR*8-1:0] RPL = {8'd1, 8'd1, 8'd1, 8'(CPL), 8'(WPL), 8'(APL), 8'd1};
-    localparam logic [NW*8-1:0] WPLV = {8'd1, 8'(CPL), 8'd1};
+    localparam logic [NR*8-1:0] RPL = {8'(VP), 8'(VP), 8'(VP), 8'(CPL), 8'(WPL), 8'(APL), 8'd1};
+    localparam logic [NW*8-1:0] WPLV = {8'(VP), 8'(CPL), 8'd1};
 
     // ---------------------------------------------------------------- control plane
     logic               eng_clr, sat_clr;
@@ -210,8 +212,8 @@ module nanoxl_top #(
     logic               ra_rvalid, rb_rvalid, rp_rvalid, wd_valid, wd_ready;
     logic [2:0]         ra_arbuf, rb_arbuf, wd_buf;
     logic [16:0]        ra_araddr, rb_araddr, rp_araddr, wd_addr;
-    logic [127:0]       ra_rdata, rb_rdata, rp_rdata, wd_data;
-    logic [15:0]        wd_strb;
+    logic [VP*128-1:0]  ra_rdata, rb_rdata, rp_rdata, wd_data;
+    logic [VP*16-1:0]   wd_strb;
     logic               pb_snoop_valid;
     logic [5*32-1:0]    vec_sat;
     /* verilator lint_off UNUSEDSIGNAL */
@@ -224,7 +226,7 @@ module nanoxl_top #(
     assign pb_snoop_valid = sp_wvalid && sp_wready && (sp_wbuf == 3'd3);
 
     vec_seq #(.L(L), .AW(17), .CTX_MAX(CTX_MAX), .D_MAX(D_MAX), .NG(NG), .NSLOT(NSLOT),
-              .NCTX(NCTX)) u_vec (
+              .NCTX(NCTX), .PL(VP)) u_vec (
         .clk(clk), .rst_n(rst_n), .clr(eng_clr),
         .cmd_valid(vec_cmd_valid), .cmd_ready(vec_cmd_ready), .cmd_word(vec_cmd_word),
         .done(vec_done), .err(vec_err), .err_code(vec_err_code), .busy(vec_busy),
@@ -266,9 +268,9 @@ module nanoxl_top #(
     assign a_rdata  = rs_d[1*PMAX*128 +: APL*128];
     assign w_rdata  = rs_d[2*PMAX*128 +: WPL*128];
     assign cr_rdata = rs_d[3*PMAX*128 +: N*32];
-    assign ra_rdata = rs_d[4*PMAX*128 +: 128];
-    assign rb_rdata = rs_d[5*PMAX*128 +: 128];
-    assign rp_rdata = rs_d[6*PMAX*128 +: 128];
+    assign ra_rdata = rs_d[4*PMAX*128 +: VP*128];
+    assign rb_rdata = rs_d[5*PMAX*128 +: VP*128];
+    assign rp_rdata = rs_d[6*PMAX*128 +: VP*128];
 
     assign wq_v = {wd_valid, cw_valid, sp_wvalid};
     assign wq_b = {wd_buf, cw_buf, sp_wbuf};
@@ -281,8 +283,8 @@ module nanoxl_top #(
         wq_s[0*PMAX*16 +: 16]     = sp_wstrb;
         wq_d[1*PMAX*128 +: N*32]  = cw_data;
         wq_s[1*PMAX*16 +: N*4]    = cw_strb;
-        wq_d[2*PMAX*128 +: 128]   = wd_data;
-        wq_s[2*PMAX*16 +: 16]     = wd_strb;
+        wq_d[2*PMAX*128 +: VP*128] = wd_data;
+        wq_s[2*PMAX*16 +: VP*16]   = wd_strb;
     end
 
     // five buffers; ids 5..7 = null buffer (reads return zeros one cycle later, writes dropped)

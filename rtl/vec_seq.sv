@@ -19,9 +19,11 @@
 // `err` (sticky; cleared by reset or clr) reports an illegal command (skipped, still done)
 // or a unit error; err_code holds the first cause.
 //
-// Scratchpad ports: three line read ports (A: src0 / scores / acc / activations, B: src1,
-// P: PBUF parameters) and one line write port (D), 16 bytes each, shaped like the DMA's
-// sp_* port. PBUF writes by other units must be reported on pb_snoop_* (residency).
+// Scratchpad ports: three read ports (A: src0 / scores / acc / activations, B: src1,
+// P: PBUF parameters) and one write port (D), each moving PL 16-byte lines per beat from any
+// start line (PL = 1: the DMA's sp_* line port; line j of a beat in bits [128j +: 128], its
+// strobes in [16j +: 16]). PBUF writes by other units must be reported on pb_snoop_*.
+// Throughput per port: PL lines per cycle (docs/vector-unit.md §9.3).
 module vec_seq #(
     parameter int L       = 4,
     parameter int AW      = 17,
@@ -32,7 +34,8 @@ module vec_seq #(
     parameter int NCTX    = 8,
     parameter int RQ_MAX  = 256,
     parameter int CH      = 4096,
-    parameter int FD      = 16
+    parameter int FD      = 16,
+    parameter int PL      = 1           // lines per beat on the A, B, P and D ports (16PL bytes)
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -51,27 +54,27 @@ module vec_seq #(
     output logic [2:0]       ra_arbuf,
     output logic [AW-1:0]    ra_araddr,
     input  logic             ra_rvalid,
-    input  logic [127:0]     ra_rdata,
+    input  logic [PL*128-1:0] ra_rdata,
     // read port B
     output logic             rb_arvalid,
     input  logic             rb_arready,
     output logic [2:0]       rb_arbuf,
     output logic [AW-1:0]    rb_araddr,
     input  logic             rb_rvalid,
-    input  logic [127:0]     rb_rdata,
+    input  logic [PL*128-1:0] rb_rdata,
     // read port P (PBUF)
     output logic             rp_arvalid,
     input  logic             rp_arready,
     output logic [AW-1:0]    rp_araddr,
     input  logic             rp_rvalid,
-    input  logic [127:0]     rp_rdata,
+    input  logic [PL*128-1:0] rp_rdata,
     // write port D
     output logic             wd_valid,
     input  logic             wd_ready,
     output logic [2:0]       wd_buf,
     output logic [AW-1:0]    wd_addr,
-    output logic [127:0]     wd_data,
-    output logic [15:0]      wd_strb,
+    output logic [PL*128-1:0] wd_data,
+    output logic [PL*16-1:0]  wd_strb,
     // PBUF writes of other units (DMA)
     input  logic             pb_snoop_valid,
     input  logic [AW-1:0]    pb_snoop_line,
@@ -218,13 +221,15 @@ module vec_seq #(
     logic [11:0]     cfg_line;
     logic [12:0]     cfg_cols;
     logic [127:0]    cfg_data;
-    logic            rec_we;
+    logic [PL-1:0]   rec_we;
     logic [12:0]     rec_idx;
-    logic [127:0]    rec_data;
-    logic            own_snoop;
-    assign own_snoop = wd_valid && wd_ready && wd_buf == B_PBUF;
+    logic [PL*128-1:0] rec_data;
+    logic [PL-1:0]   own_snoop;             // lines of an accepted PBUF write that carry a strobe
+    for (genvar j = 0; j < PL; j++) begin : g_snoop
+        assign own_snoop[j] = wd_valid && wd_ready && wd_buf == B_PBUF && (|wd_strb[j*16 +: 16]);
+    end
 
-    pbuf_loader #(.AW(AW), .NSLOT(NSLOT), .NG(NG), .NCTX(NCTX), .FD(FD)) u_ld (
+    pbuf_loader #(.AW(AW), .NSLOT(NSLOT), .NG(NG), .NCTX(NCTX), .FD(FD), .P(PL)) u_ld (
         .clk(clk), .rst_n(rst_n), .clr(clr),
         .req_valid(ld_req), .idle(ld_idle), .req_kind(l_kind), .req_line(l_line),
         .req_cols(l_cols), .req_table(l_table), .req_n(l_n),
@@ -239,25 +244,32 @@ module vec_seq #(
         .st_hits(st_hits), .st_misses(st_misses), .st_lines(st_lines)
     );
 
-    // record buffer (REQUANT): bias, mult, shift per output channel of the current chunk
+    // record buffer (REQUANT): bias, mult, shift per output channel of the current chunk;
+    // up to PL consecutive records written per cycle (record rec_idx + j from line j)
     logic [31:0] rec_bias  [RQ_MAX];
     logic [31:0] rec_mult  [RQ_MAX];
     logic [4:0]  rec_shift [RQ_MAX];
     logic        ls_bad;
     always_ff @(posedge clk) begin
-        if (rec_we && 32'(rec_idx) < RQ_MAX) begin
-            rec_bias[rec_idx]  <= rec_data[31:0];
-            rec_mult[rec_idx]  <= rec_data[63:32];
-            rec_shift[rec_idx] <= rec_data[68:64];
+        for (int j = 0; j < PL; j++) begin
+            if (rec_we[j] && 32'(rec_idx) + j < RQ_MAX) begin
+                rec_bias[32'(rec_idx) + j]  <= rec_data[j*128 +: 32];
+                rec_mult[32'(rec_idx) + j]  <= rec_data[j*128 + 32 +: 32];
+                rec_shift[32'(rec_idx) + j] <= rec_data[j*128 + 64 +: 5];
+            end
         end
     end
-    assign ls_bad = rec_we && (rec_data[127:96] != '0);
+    logic [PL-1:0] ls_bad_j;
+    for (genvar j = 0; j < PL; j++) begin : g_lsbad
+        assign ls_bad_j[j] = rec_we[j] && (rec_data[j*128 + 96 +: 32] != '0);
+    end
+    assign ls_bad = |ls_bad_j;
 
     // A / B readers, D writer
     logic            rd_start, ra_busy, rb_busy, wr_busy;
     logic            a_v, a_r, a_l, b_v, b_r, b_l;
     logic [L*32-1:0] a_d, b_d;
-    vec_seq_rd #(.L(L), .AW(AW), .FD(FD)) u_ra (
+    vec_seq_rd #(.L(L), .AW(AW), .FD(FD), .P(PL)) u_ra (
         .clk(clk), .rst_n(rst_n), .clr(clr), .start(rd_start), .d_buf(a_buf), .d_base(a_base),
         .d_so(a_so), .d_no(s_no), .d_si(a_si), .d_ni(s_ni), .d_nrows(s_nrows), .d_len(s_len),
         .d_len_last(s_len_last), .d_ebl(a_ebl), .busy(ra_busy),
@@ -265,7 +277,7 @@ module vec_seq #(
         .r_valid(ra_rvalid), .r_data(ra_rdata),
         .o_valid(a_v), .o_ready(a_r), .o_data(a_d), .o_last(a_l)
     );
-    vec_seq_rd #(.L(L), .AW(AW), .FD(FD)) u_rb (
+    vec_seq_rd #(.L(L), .AW(AW), .FD(FD), .P(PL)) u_rb (
         .clk(clk), .rst_n(rst_n), .clr(clr), .start(rd_start && use_b), .d_buf(b_buf),
         .d_base(b_base), .d_so(b_so), .d_no(s_no), .d_si('0), .d_ni(7'd1), .d_nrows(s_nrows),
         .d_len(s_len), .d_len_last(s_len_last), .d_ebl(a_ebl), .busy(rb_busy),
@@ -277,7 +289,7 @@ module vec_seq #(
     logic            vd_valid, vd_ready, vd_last;
     logic [L*32-1:0] vd_data;
     logic [L-1:0]    vd_keep;
-    vec_seq_wr #(.L(L), .AW(AW)) u_wd (
+    vec_seq_wr #(.L(L), .AW(AW), .P(PL)) u_wd (
         .clk(clk), .rst_n(rst_n), .clr(clr), .start(rd_start), .d_buf(d_buf), .d_base(d_base),
         .d_so(d_so), .d_no(s_no), .d_si(d_si), .d_ni(s_ni), .d_len(s_len),
         .d_len_last(s_len_last), .d_ebl(d_ebl), .busy(wr_busy),

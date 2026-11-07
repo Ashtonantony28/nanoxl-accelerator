@@ -14,7 +14,9 @@ def _pack(pl):
 
 @pytest.mark.parametrize("lines,nb,rpl,wpl", [
     (64, 4, [1, 2, 4, 1], [1, 4, 2]),                  # widest beats occupy every bank
-    (128, 8, [1, 1, 2, 4, 1, 1, 1], [1, 4, 1]),        # nanoxl_top N=16 port set (NB = 2 x widest)
+    (128, 8, [1, 1, 2, 4, 1, 1, 1], [1, 4, 1]),        # nanoxl_top N=16, VP=1 port set (NB = 2 x widest)
+    (128, 8, [1, 1, 1, 4, 4, 4, 4], [1, 4, 4]),        # nanoxl_top N=16, VP=4: 64-byte VEC A/B/P/D ports
+    (64, 8, [1, 1, 1, 2, 4, 4, 4], [1, 2, 4]),         # nanoxl_top N=8, VP=4 (smoke config)
     (32, 2, [1, 1, 1], [1, 1]),                        # N <= 4: all ports one line
 ])
 def test_top_spad(lines, nb, rpl, wpl):

@@ -30,7 +30,8 @@ External ports: AXI4-Lite CSR slave (`s_axil_*`, docs/control.md §5), AXI4 read
 | `N`, `L` | 8, 4 | array size, vector lanes (tests: N=8/L=4 fast tier, N=16/L=16 full model) |
 | `M_DEPTH` | 64 | array_ctrl accumulator rows |
 | `ABUF_LINES` … `KV_LINES` | 64 / 32 / 64 / 32 / 128 KiB | buffer capacities in 16-byte lines (powers of two); line addresses wrap |
-| `NB` | 0 (auto) | banks per buffer; auto = 2 × widest port, power of two (N=16: 8) |
+| `NB` | 0 (auto) | banks per buffer; auto = 2 × widest port, power of two (N ≤ 16: 8, N = 32: 16) |
+| `VP` | 4 | VEC engine port beat in 16-byte lines (A, B, P, D; `vec_seq.PL`, SG10b); 1 = the earlier 16-byte ports, cycle-identical |
 | `CTX_MAX`, `D_MAX`, `NG`, `NSLOT`, `NCTX` | 256, 384, 4, 16, 8 | vec_seq limits / parameter slots (shakespeare needs NG ≥ 6) |
 | `MAXB`, `LDF` | 256, 512 | DMA burst / load FIFO |
 
@@ -63,16 +64,26 @@ response backpressure):
 |---|---|---|---|---|---|---|
 | 0 | DMA (`sp_ar*`) | 1 | | 0 | DMA (`sp_w*`) | 1 |
 | 1 | array A (ABUF) | ceil(N/16) | | 1 | array ACC (`cw_*`) | N/4 |
-| 2 | array W (WBUF/KVBUF) | ceil(N/16) | | 2 | VEC D (`wd_*`) | 1 |
+| 2 | array W (WBUF/KVBUF) | ceil(N/16) | | 2 | VEC D (`wd_*`) | VP (4) |
 | 3 | array ACC (`cr_*`) | N/4 | | | | |
-| 4, 5 | VEC A, B (any buffer) | 1 | | | | |
-| 6 | VEC P (PBUF) | 1 | | | | |
+| 4, 5 | VEC A, B (any buffer) | VP (4) | | | | |
+| 6 | VEC P (PBUF) | VP (4) | | | | |
 
 * **Routing.** The router sends each request to the buffer named by its id (ids 5–7: a null buffer
   that accepts, returns zeros, drops writes; the decoders reject such ids before they get here).
 * **Banking.** A beat of P lines from any start line touches P distinct banks when NB ≥ P (checked
   at elaboration), so array beats that start mid-window (ACC rows on any line, ragged weight rows)
-  cost no extra cycle.
+  and VEC beats that start on any row line cost no extra cycle.
+* **Bank count per VEC port width (SG10b).** Required: NB ≥ max(VP, N/4, ceil(N/16)). Built: NB = 2 ×
+  that (VP = 4: 8 banks at N = 8/16, 16 at N = 32; VP = 1: 4 at N = 8, 8 at N = 16). Two P-line
+  streams that both want a beat every cycle in the same buffer are conflict-free only when their start
+  banks differ by at least P both ways round (mod NB); otherwise the rotating priority alternates them
+  and each runs at half rate. With NB = 2P that is one offset in P; NB = 4P would make it half of all
+  offsets. The common case does not need it: the full-rate VEC streams (REQUANT and softmax reading
+  ACC, LN) are single-source, the D port arbitrates against the write ports only, and int8 streams at
+  L ≤ 16 use a quarter of the A/B beats, which the 16-beat read FIFO absorbs. The two-source case at
+  full rate is a VEC ADD of int8 at L = 64 with both sources in one buffer (the residual add, a few
+  hundred beats per layer); docs/vector-unit.md §9.3.
 * **Arbitration.** Per buffer and cycle, reads and writes separately: ports are visited in a rotating
   order (start advances every cycle); a request is granted when none of its banks was taken by an
   earlier port in that order. `ready` = grant (combinational on `valid`; no requester makes `valid`
@@ -112,7 +123,7 @@ response backpressure):
 | SG7b / A1-02 | NSAT = 5, counter order | §2 (canonical map, driver/SimBackend aligned, audit test passing) |
 | SG7b / AUDIT-1 | PBUF snoop on every DMA write into PBUF | §2; mutation-checked (§5) |
 | SG7b | `eng_clr` → `clr` | §2; pulsed by the driver's soft reset at every `NanoXL()` |
-| SG7b / A1-01 | 16-byte VEC ports limit int32 streams at L = 16/64 | **deferred**: ports stay 16 bytes. Measured cost at L=16 in §6 (VEC busy 2× the model in prefill). Widening `vec_seq_rd/wr` to a parameterized line count (and giving the VEC ports `L·4/16` lines) is the follow-up; `buf_spad` already supports multi-line beats per port |
+| SG7b / A1-01 | 16-byte VEC ports limit int32 streams at L = 16/64 | **fixed (SG10b)**: VEC A/B/P/D ports are VP = 4 lines (64 B); int32 at 16 per cycle (lane rate at L = 16, still port bound at L = 64). Prefill −10 % (W8A8) / −12 % (W4A8), §6 |
 | SG7b | one VEC command at a time; KV_APPEND dh % 16 | unchanged; compiler satisfies both |
 | SG7b/SG4c | shakespeare NG ≥ 6, LN params reloaded per program | `NG` is a top parameter; reload costs measured in §6 |
 
@@ -121,9 +132,10 @@ response backpressure):
 | test | tier | what |
 |---|---|---|
 | `test_top_spad` (3 configs) | fast, Icarus/Verilator | randomized multi-port traffic on `buf_spad` (beats of 1/2/4 lines at any start, wrap at the end, strobes, valid held until ready) vs a line model with write-visible-to-later-read; no two grants share a bank; starvation bound |
-| `test_top_smoke` | fast (Icarus: prefill only, ~90 s; Verilator: + 1 decode step, ~10 s) | 1-layer cut of tiny W8A8, 2-token prompt, N=8, L=4, real driver over AXI; logits, KV cache, per-op saturation counts, SAT CSRs == golden. The compiler's PBUF ring is 10 KiB so different LN blocks reuse PBUF lines |
+| `test_top_smoke` | fast (Icarus: prefill only, ~90 s; Verilator: + 1 decode step, ~10 s) | 1-layer cut of tiny W8A8, 2-token prompt, N=8, L=4, VP=4, real driver over AXI; logits, KV cache, per-op saturation counts, SAT CSRs == golden. The compiler's PBUF ring is 10 KiB so different LN blocks reuse PBUF lines |
 | `test_top_smoke_saturation` | fast, Verilator | same with requant/LN shifts lowered so the requant, score, PV, residual (ALU) and LN-out clamps fire (hundreds of events), counts per op == golden |
 | `test_top_tiny[w8a8/w4a8 × onchip/ddr]` | slow, Verilator (~70 s each) | full tiny, N=16, L=16: 16-token reference prompt + 8 greedy decode steps through `NanoXL.step` (ring, doorbell, IRQ wait, logits read, argmax); logits every step, KV cache (on-chip: DMA'd out by a host program; DDR: the image's KV region), per-op saturation counts == golden; tokens == `golden_ref.json` |
+| `test_top_tiny_vp1[w8a8/w4a8]` | slow, Verilator | as `test_top_tiny` on-chip with VP = 1 (16-byte VEC ports): bit-exact, and its cycles equal the SG7c measurement exactly |
 | `test_top_tiny_saturation` | slow, Verilator | full 4-layer W4A8 with lowered shifts, 4-token prompt + 2 steps, 30 % random stalls on all AXI channels |
 
 **Bench.** `top_cocotb.py` runs the unmodified `nanoxl.driver.NanoXL` in a cocotb `bridge` thread; its
@@ -144,29 +156,34 @@ with `Golden.sat_count` (+ the driver's host-embedding `resid` count).
 ## 6. Performance: measured vs `nanoxl.cyclemodel`
 
 PERF_CYCLES per step (cycles the device was not idle), N=16, L=16, test buffers, AxiRam with no
-stalls (≈ 2-cycle DDR latency), against `cyclemodel.simulate(prog.cmds, hw)` for the same program and
-`HwConfig`:
+stalls (≈ 2-cycle DDR latency), against `cyclemodel.simulate(prog.cmds, hw, tm)` for the same program,
+`HwConfig` and VEC port width (`vec_port_lines` = VP). As built (VP = 4, 64-byte VEC ports, SG10b):
 
 | bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
 |---|---|---|
-| W8A8, on-chip | 88,976 / 78,492 (+13 %) | 67,241–67,365 / 68,707–68,819 (−2 %) |
-| W4A8, on-chip | 96,202 / 80,319 (**+20 %**) | 72,815–72,939 / 70,021–70,133 (+4 %) |
-| W8A8, DDR KV | 89,137 / 83,388 (+7 %) | 67,493–67,673 / 71,347–71,795 (−5 %) |
-| W4A8, DDR KV | 96,570 / 85,823 (+13 %) | 73,107–73,287 / 72,973–73,421 (0 %) |
+| W8A8, on-chip | 80,098 / 81,226 (−1 %) | 66,104–66,216 / 70,073–70,185 (−6 %) |
+| W4A8, on-chip | 84,342 / 85,377 (−1 %) | 71,958–72,070 / 73,935–74,047 (−3 %) |
+| W8A8, DDR KV | 80,271 / 86,150 (−7 %) | 66,360–66,528 / 72,189–72,637 (−8 %) |
+| W4A8, DDR KV | 84,749 / 90,909 (−7 %) | 72,254–72,422 / 76,363–76,811 (−6 %) |
 
-Engine busy cycles (W8A8 on-chip prefill, measured / model): DMA 56.0k / 62.0k, ARRAY 56.3k / 50.8k,
-VEC 47.9k / 23.7k. Decode is DMA-bound (all weights, ~800 KB W8A8 / ~410 KB W4A8, stream through one
-128-bit master) and the array overlaps it, so the model is within 5 %.
+With 16-byte VEC ports (VP = 1, `test_top_tiny_vp1`; identical to the SG7c measurement):
 
-**The gap over 15 % (W4A8 prefill, +20 %)** is the VEC engine. Its scratchpad ports move one 16-byte
-line per cycle, so at L = 16 the int32 streams (REQUANT and softmax reading ACC) deliver 4 elements
-per cycle, and REQUANT also reads one 16-byte record per output channel; the model prices VEC work at
-L elements per cycle (AUDIT-1 A1-01, being fixed in the cycle model by another worker). In prefill
-(M = 16) the REQUANT → next GEMM chain puts this on the critical path; W4A8 suffers more because its
-DMA time is half of W8A8's, so less of the VEC time is hidden. The second part is GEMM_GS tiles
-(one scale beat per K-tile, ARRAY busy 58.7k vs 51.6k). In decode (M = 1) both effects are small
-next to the weight stream. The model's DDR latency (300 ns) is not exercised by the AxiRam, which is
-why measured DMA busy is ~10 % below the model.
+| bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
+|---|---|---|
+| W8A8, on-chip, VP = 1 | 88,976 / 90,227 (−1 %) | 67,241–67,365 / 70,745–70,857 (−5 %) |
+| W4A8, on-chip, VP = 1 | 96,202 / 96,900 (−1 %) | 72,815–72,939 / 74,843–74,955 (−3 %) |
+
+**VP = 1 → 4:** prefill −10.0 % (W8A8) and −12.3 % (W4A8); decode −1.7 % / −1.2 % (M = 1 VEC work is
+small next to the weight stream). VEC engine busy in the W8A8 on-chip prefill 47.9k → 26.8k cycles
+(model 48.0k → 26.9k, within 0.3 %); W4A8 47.4k → 26.3k. The other engines do not move: ARRAY 56.3k
+(model 51.3k: GEMM_GS / tile bubbles), DMA 56.0k (model 62.0k: the model's 300 ns DDR latency is not
+exercised by the AxiRam). Prefill is now ARRAY + DMA bound at this size; the remaining VEC time
+is the int32 softmax / REQUANT and the SFU per-row fixed costs (docs/vector-unit.md §9.3).
+
+Modelled KV260 shakespeare (N = 32, L = 64, 256-token prefill, `estimate(SHAKESPEARE, KV260)`): prefill
+17.6 → 14.7 ms, array utilization 0.66 → 0.78 (W8A8; W4A8 the same), decode unchanged (332 / 594 tok/s
+W8A8 / W4A8, single-DMA-master bound). The prefill critical path is 77 % GEMM, 8 % softmax (int32
+scores at 16 per cycle), 7 % attention GEMMs, 4 % LN.
 
 ## 7. Lint
 

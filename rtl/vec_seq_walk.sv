@@ -3,10 +3,14 @@
 // Walks the 16-byte lines of a two-level row set: row (o, i) for o < no, i < ni starts at
 // line  base + o*so + i*si  and holds ceil(len * 2^ebl / 16) lines; the final row (o = no-1,
 // i = ni-1) holds len_last elements instead of len. Rows are visited o-major, i-minor and
-// the lines of a row in increasing order. `step` advances by one line; `act` is high while
-// a line remains (`addr` is that line). Addresses wrap at 2^AW lines.
+// the lines of a row in increasing order, P lines per beat: a beat starts at the row's first
+// line (any line) or P lines after the previous beat of the row, and the row's final beat
+// covers the remaining 1..P lines (lines past the row end belong to the beat but not to the
+// row). `step` advances by one beat; `act` is high while a beat remains (`addr` is its first
+// line). Addresses wrap at 2^AW lines. P = 1: one line per step.
 module vec_seq_walk #(
-    parameter int AW = 17
+    parameter int AW = 17,
+    parameter int P  = 1
 ) (
     input  logic          clk,
     input  logic          rst_n,          // includes the engine clear
@@ -22,7 +26,7 @@ module vec_seq_walk #(
     input  logic          step,
     output logic          act,
     output logic [AW-1:0] addr,
-    output logic          row_last_line   // addr is the final line of its row
+    output logic          row_last_line   // the beat at addr holds the final line of its row
 );
     logic [AW-1:0] rowb, outb;
     logic [12:0]   o;
@@ -38,7 +42,7 @@ module vec_seq_walk #(
 
     assign last_row      = (o == no - 13'd1) && (i == ni - 7'd1);
     assign addr          = rowb + AW'(k);
-    assign row_last_line = (k == nl - 14'd1);
+    assign row_last_line = (15'(k) + 15'(P) >= 15'(nl));
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -55,7 +59,7 @@ module vec_seq_walk #(
             end
         end else if (step) begin
             if (!row_last_line) begin
-                k <= k + 14'd1;
+                k <= k + 14'(P);
             end else begin
                 k <= '0;
                 if (last_row) begin

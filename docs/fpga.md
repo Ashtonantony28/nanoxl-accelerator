@@ -168,15 +168,36 @@ internal re-implementation the owner's existing tests cover. Estimates are rough
 
 | # | owner / file | change | saves (KV260) |
 |---|---|---|---|
-| C1 | SG5 `rtl/lut_rom.sv` | store the table as `2^AW / WN` lines of `WN·DW` bits (one write port, one line per LUT_LOAD beat) and select the entry after the registered line read. Today `WN` = 8 / 16 entries are written per cycle into a `DW`-wide array, a multi-write-port memory that no RAM primitive implements, so all 322 tables (exp2 ×128, recip ×65, rsqrt ×65, GELU ×64) become flip-flops plus 256:1 read muxes. As lines they map to LUTRAM (~10 RAM32M16 + a 16-bit 8:1 select, ~120 LUTs per table) | **~2.1 M FF, ~740 k LUT** |
+| C1 | SG5 `rtl/lut_rom.sv` | **Done (SG11a).** The table is stored as `2^AW / WN` lines of `WN·DW` bits (one write port writing one line per LUT_LOAD beat, one asynchronous line read), the entry selected by the low address bits in front of the `DW`-bit read register (selecting after a registered line read costs `WN·DW` FFs per table and lets Yosys put the 2048-entry GELU tables into 2 BRAM36 each). Per table: 256 × uint16 1,418 LUT / 4,112 FF → 48 LUT + 10 RAM32M16 / 16 FF; GELU (8 slots) 6,490 / 16,392 → 90 LUT + 38 RAM64M8 / 8 FF | measured with C3/C6 (table below): `sfu` L = 64 **−820 k LUT, −2.14 M FF**; L = 16 −198 k LUT, −535 k FF |
 | C2 | SG7c `rtl/buf_spad.sv` | rewrite the arbitration as `NR` precomputed static priority orders selected by the rotation counter, with per-bank one-hot AND-OR muxes and a barrel rotate per wide port, instead of `(rr + k) % NR` dynamic indices and dynamic part selects (`w_data[p*PMAX*128 +: 128]`, `b_wdata[bank_of(...)]`), which Yosys turns into 32-bit multipliers and shifters (10 DSPs and ~95 k LUTs per buffer, ×5). A crossbar of 8 read / 4 write ports onto 8 banks is ~10-15 k LUTs per buffer. Also: a per-buffer `NB` and a `RAM_STYLE` parameter on `spad_bank` (then the XDC patterns of §1 are not needed) | ~400 k LUT, 50 DSP |
-| C3 | SG5 `rtl/sfu_elem.sv` (+ `sfu_recip`, `sfu_rsqrt`, `sfu_exp2`) | time-multiplex the elementwise RECIP / RSQRT / EXP2 lanes (e.g. 8 per cycle instead of L = 64). The compiler emits **no** elementwise RECIP or RSQRT at all (LN uses one rsqrt per row, softmax one recip per row), so their throughput is irrelevant to every compiled model (ADR-003 lists them as the first reduction) | ~340 DSP, ~25 k LUT |
+| C3 | SG5 `rtl/sfu_elem.sv` | **Done (SG11a).** EXP2 / RECIP / RSQRT run on `EL` shared primitive lanes (`sfu`: `EL = min(L, 8)`); a beat is split into L/EL sub-beats through a shift register and reassembled in the output register. GELU and pass-through stay at L lanes, 1 beat/cycle. Elementwise EXP2 / RECIP / RSQRT (never emitted by the compiler) now take L/EL cycles per beat (8 at L = 64, 2 at L = 16) and L/EL − 1 cycles more latency; results unchanged (docs/sfu.md §3) | `sfu_elem` L = 64: 384 → 48 DSP (−336), 46.2 k → 14.7 k LUT after C1; L = 16: 96 → 48 DSP |
 | C4 | SG3 `rtl/vec_alu.sv` | VEC `MUL` is a full 64 × 64 product (`a64 * b64`) per lane, combinational before the S1 register, plus a 64-bit variable rounding shift. The compiler emits no VEC MUL; narrow it to 32 × 16 (or one shared multiplier over several cycles) and register the operands | ~200 DSP, ~60 k LUT; fixes a timing path (§5) |
 | C5 | SG2 `rtl/pe.sv` / `systolic_array.sv` | INT8 2-MAC packing in DSP48E2 (two weights × one activation per DSP, Xilinx WP486), as ADR-003 assumed (512 DSPs for N = 32). The systolic pass gives neighbouring PEs the activation one cycle apart, so the packing needs the two PEs of a pair to share one activation register. Alternative without restructuring: `(* use_dsp = "no" *)` on half the PEs (8×8 multiply ≈ 40-60 LUTs: ~25 k LUT for 512 PEs) | 512 DSP |
-| C6 | SG3 `rtl/requant.sv` / SG5 `softmax.sv` | two 64-lane requantizers (VEC REQUANT and the softmax score requant) each with 64 `srdhm` 32 × 32 multipliers (4 DSP48E2 each: 516 DSPs). Share one requantizer between the two users, or run the score requant at fewer lanes | ~260 DSP |
+| C6 | SG3 `rtl/requant.sv` / SG5 `softmax.sv` | **Softmax side done (SG11a):** the score requant has `RQL` lanes (`sfu`: `SM_RQL = min(L, 16)`, the int32 rate of the 64-byte VEC A port); an int32 beat goes through as L/RQL sub-beats and is reassembled before the row buffer, results and clamp counts unchanged. At L = 64 SOFTMAX_ONLINE rows cost +3 cycles (PL = 1) / +3-6 (PL = 4) each (re-measured, `VEC_CAL[·][64]` refit; shakespeare KV260 prefill +1.2 %, docs/top.md §6). L ≤ 16 unchanged. VEC REQUANT (SG3) is not touched | `softmax` L = 64: 324 → 132 DSP (−192), 67.7 k → 45.3 k LUT after C1 |
 | C7 | SG3 `rtl/vec_reduce.sv` | split the 64-leaf, 48-bit adder/compare tree (one cycle today) into 2-3 pipeline stages | timing (§5) |
 | C8 | SG7c `rtl/buf_spad.sv` / `spad_bank.sv` | optional second read register (URAM OREG) behind a parameter, with the read latency of the ports raised to 2 (the requesters' credit counters already allow it; the visibility rule of docs/top.md §3 must be re-checked) | timing (§5) |
 | C9 | SG7b `rtl/vec_seq_rd.sv` (and `vec_seq.sv`) | the lane unpack selects each lane's element with `asm_b[(e % AE)*8 +: 8]` per lane and element size: an `AE`-byte mux per lane (×L, ×2 instances). The element offsets of consecutive lanes are consecutive, so a single barrel rotate of the assembly buffer by the start offset followed by fixed wiring per lane gives the same result. Same pattern for `vec_seq`'s own row assembly (44 k LUT at L = 16) | ~35 k LUT at L = 16, ~100 k at L = 64 (estimated) |
+
+Measured C1 + C3 + C6 (SG11a; per module, `synth_xilinx -family xcup -uram`, hierarchical, same
+pre-steps as the `vec_seq` job; `sfu` = `sfu_elem` + `softmax` + `layernorm` + routing with NG = 6, CTX_MAX =
+256, D_MAX = 384, NSLOT = 16, NCTX = 8; `sfu_elem` / `softmax` rows at their module defaults EL = L / RQL = L
+unless marked). LUT / FF / DSP (LUTRAM in LUT6 units listed separately):
+
+| module | L = 64 before | L = 64 after | L = 16 before | L = 16 after |
+|---|---|---|---|---|
+| `lut_rom` 256 × uint16 (one table) | 1,418 / 4,112 / 0 | 48 + 10 LUTRAM / 16 / 0 | same | same |
+| `lut_rom` GELU, 8 slots (one table) | 6,490 / 16,392 / 0 | 90 + 38 LUTRAM / 8 / 0 | same | same |
+| `sfu_elem` (EL = L) | 722,305 / 1,861,958 / 384 | 46,210 / 26,956 / 384 | 180,577 / 465,494 / 96 | 11,906 / 6,748 / 96 |
+| `sfu_elem` EL = 8 | – | 14,724 / 7,854 / **48** | – | 7,281 / 3,868 / **48** |
+| `softmax` (RQL = L) | 156,749 / 290,800 / 324 | 67,729 / 24,560 / 324 | 40,540 / 76,000 / 84 | 17,235 / 6,368 / 84 |
+| `softmax` RQL = 16 | – | 45,349 / 13,834 / **132** | (= RQL = L) | (= RQL = L) |
+| `layernorm` | 56,328 / 17,882 / 264 | 55,019 / 13,786 / 264 | 15,650 / 8,042 / 72 | 14,331 / 3,946 / 72 |
+| **`sfu`** (as built: EL = 8, SM_RQL = 16) | **937,572 / 2,170,823 / 972** | **117,136 / 35,657 / 444** | **237,346 / 549,719 / 252** | **39,392 / 14,365 / 204** |
+| `sfu` LUTRAM / BRAM36 | 6,424 / 48 | 9,259 / 48 | 1,648 / 12 | 2,764 / 12 |
+
+`bench/results/resources_*.json` are not re-run yet (the `vec_seq` job alone is ~1 h of Yosys); the `sfu`
+row is what moves inside `vec_seq`: KV260 −820 k LUT, −2.14 M FF, −528 DSP; PYNQ-Z2-size (L = 16) −198 k LUT,
+−535 k FF, −48 DSP.
 
 With C1-C6 the KV260 estimate drops to roughly 0.54 M LUT, still 4.6× the XCK26; with L = 16 and C1, C2,
 C9 to ~220 k (§2.1 has the table). **The first KV260 bitstream therefore needs L = 16 and probably N = 16,

@@ -1,5 +1,6 @@
 """Functional simulator: compiled (tiled, K-accumulated, double-buffered) programs reproduce the untiled
-nanoxl.numerics reference bit for bit, and the race checker proves the sync is sufficient."""
+C5 integer reference (nanoxl.graph.reference_run) bit for bit, including saturation counts, and the race
+checker proves the sync is sufficient. The real-model end-to-end check is test_funcsim_golden.py."""
 import numpy as np
 import pytest
 
@@ -59,7 +60,11 @@ def test_funcsim_tiled_mlp_matches_untiled(seed):
         assert np.array_equal(out[k], ref[k]), (k, K0, H, N, M, na, wbits)
     # independent check of the reference itself against the raw numerics
     p = params["fc"]
-    acc = nx.gemm_i8(inputs["a"], p["w"])
+    if wbits == 4:   # W4A8: acc = sum_g gm[g, n] * acc_g, written out longhand
+        acc = sum(p["gm"][g].astype(np.int64) * nx.gemm_i8(np.ascontiguousarray(inputs["a"][:, 64 * g:64 * g + 64]),
+                                                           p["w"][64 * g:64 * g + 64]) for g in range(len(p["gm"])))
+    else:
+        acc = nx.gemm_i8(inputs["a"], p["w"])
     assert np.array_equal(reference_run(Graph(g.tensors, g.ops[:1], ["a"], ["h"]), params, inputs)["h"],
                           nx.requant(acc, p["mult"], p["shift"], p["bias"], 8))
 
@@ -98,14 +103,15 @@ def test_funcsim_extreme_values_saturate_like_reference():
 @pytest.mark.parametrize("hw", [KV260, PYNQ_Z2, KV260.with_(kv_onchip=False, array_n=16)],
                          ids=["kv260-onchipKV", "pynq-ddrKV", "kv260-ddrKV-n16"])
 def test_funcsim_tiny_gpt_prefill_then_decode(hw):
-    """Full tiny model: prefill 9 tokens then 3 decode steps; logits and KV cache bit-exact vs the
-    untiled reference (LN/softmax are shared float placeholders)."""
+    """Full tiny model (synthetic parameters): prefill 9 tokens then 3 decode steps; logits, KV cache
+    and saturation counts bit-exact vs the untiled C5 reference."""
     cfg = TINY
     g = build_gpt_graph(cfg)
     params = make_synthetic_params(g, 0)
     comp = Compiler(g, params, hw)
     sim = FuncSim(hw, comp.img)
     kv = new_kv_state(cfg, 1)
+    counter = {}
     steps = [(0, 9), (9, 1), (10, 1), (11, 1)]
     for i, (pos, n) in enumerate(steps):
         prog = comp.compile_step([(pos, n)])
@@ -113,7 +119,7 @@ def test_funcsim_tiny_gpt_prefill_then_decode(hw):
         sim.write_input(prog, "x", x0)
         sim.run(prog.cmds)
         out = sim.read_output(prog, "logits")
-        ref = reference_run(g, params, {"x": x0}, [(pos, n)], kv)["logits"]
+        ref = reference_run(g, params, {"x": x0}, [(pos, n)], kv, counter)["logits"]
         assert np.array_equal(out, ref), f"step {i}"
         assert ref.std() > 100
         if i == 0:
@@ -127,7 +133,10 @@ def test_funcsim_tiny_gpt_prefill_then_decode(hw):
                 else:
                     got = sim.read(DDR, comp.kv_ddr_addr(0, l, kind, h), cfg.d_head, 12, cfg.d_head)
                 assert np.array_equal(got.view(np.int8), kv[0][l, kind, h, :12])
-    assert sim.stats["placeholder_ops"] > 0  # LN / softmax are flagged placeholders
+    nz = lambda d: {k: v for k, v in d.items() if v}
+    assert nz(sim.sat_count) == nz(counter)
+    ops = {c.op for c in prog.cmds}
+    assert {"LN", "SOFTMAX_ONLINE", "GELU", "LUT_LOAD"} <= ops
 
 
 def test_funcsim_batched_decode_different_positions():

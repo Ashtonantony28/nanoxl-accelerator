@@ -135,6 +135,11 @@ class Gen:
         for t in range(3):
             tb.add(isa.C("LUT_LOAD", table=t, src_addr=P_LUT + 512 * t))
 
+    def hot(self, n):
+        """Pool index: two hot blocks most of the time (residency hits, rewrites of resident
+        blocks), any block otherwise (evictions)."""
+        return self.rng.randrange(2) if self.rng.random() < 0.7 else self.rng.randrange(n)
+
     # -- region helpers
     def src(self, buf, nbytes):
         half = len(self.tb.mem[buf]) // 2
@@ -217,7 +222,7 @@ class Gen:
 
     def ln(self):
         rng = self.rng
-        addr, cols = rng.choice(self.lnb)
+        addr, cols = self.lnb[self.hot(len(self.lnb))]
         rows = rng.randrange(1, 4)
         in16 = int(rng.random() < 0.8)
         eb = 2 if in16 else 1
@@ -240,7 +245,7 @@ class Gen:
         src = self.src(isa.ACC, rows * ss * LINE)
         self.fill(isa.ACC, src, rows * ss * LINE, "i32")
         dst = self.dst(isa.ABUF, rows * ds * LINE)
-        ctx = P_CTX + 16 * rng.randrange(N_CTX)
+        ctx = P_CTX + 16 * self.hot(N_CTX)
         return isa.C("SOFTMAX_ONLINE", first=1, last=1, causal=causal, src_addr=src, dst_addr=dst, ctx_addr=ctx,
                      rows=rows, cols=cols, diag=diag, src_stride=ss, dst_stride=ds)
 
@@ -250,7 +255,7 @@ class Gen:
         src = self.src(isa.ABUF, n)
         self.fill(isa.ABUF, src, n)
         dst = src if rng.random() < 0.3 else self.dst(isa.ABUF, n)
-        return isa.C("GELU", src_addr=src, dst_addr=dst, lut_addr=P_GELU + 256 * rng.randrange(N_GELU), len=n)
+        return isa.C("GELU", src_addr=src, dst_addr=dst, lut_addr=P_GELU + 256 * self.hot(N_GELU), len=n)
 
     def kv(self):
         rng = self.rng
@@ -283,14 +288,14 @@ class Gen:
         rng, tb = self.rng, self.tb
         k = rng.randrange(3)
         if k == 0:
-            i = rng.randrange(len(self.lnb))
+            i = self.hot(len(self.lnb))
             addr, cols = self.lnb[i]
             tb.write_mem(isa.PBUF, addr, ln_variant(rng, cols, rng.randrange(9) if cols == 128 else None))
         elif k == 1:
             t = np.array([rng.randrange(-128, 128) for _ in range(256)], np.int8)
-            tb.write_mem(isa.PBUF, P_GELU + 256 * rng.randrange(N_GELU), t.tobytes())
+            tb.write_mem(isa.PBUF, P_GELU + 256 * self.hot(N_GELU), t.tobytes())
         else:
-            tb.write_mem(isa.PBUF, P_CTX + 16 * rng.randrange(N_CTX), rec_bytes([rand_record(rng, score=True)]))
+            tb.write_mem(isa.PBUF, P_CTX + 16 * self.hot(N_CTX), rec_bytes([rand_record(rng, score=True)]))
 
     def any(self):
         only = os.environ.get("VS_ONLY")
@@ -330,7 +335,7 @@ async def run_random(dut, seed, n_cmds, **tbkw):
         left -= k
         await tb.drain()
         tb.compare_all()
-        if rng.random() < 0.4:
+        for _ in range(2 if rng.random() < 0.7 else 0):
             g.rewrite_pool()
     dut._log.info(f"{n_cmds} random commands in {tb.cyc} cycles; loader hits {u(dut.st_hits)}"
                   f" misses {u(dut.st_misses)} lines {u(dut.st_lines)}")

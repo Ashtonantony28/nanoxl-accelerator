@@ -1,50 +1,50 @@
 | board | model | W | KV | B | prefill ms (T) | prefill util | decode tok/s | weight bound | DDR util |
 |---|---|---|---|---|---|---|---|---|---|
-| kv260 | tiny | 8 | onchip | 1 | 0.91 (128, chunk 128) | 0.51 | 3780 | 10066 | 0.42 |
-| kv260 | tiny | 8 | onchip | 4 |  |  | 12275 | 40264 | 0.34 |
-| kv260 | tiny | 8 | onchip | 8 |  |  | 19624 | 80528 | 0.27 |
-| kv260 | tiny | 8 | ddr | 1 | 1.20 (128, chunk 128) | 0.38 | 3535 | 10066 | 0.42 |
-| kv260 | tiny | 8 | ddr | 4 |  |  | 10191 | 40264 | 0.36 |
-| kv260 | tiny | 8 | ddr | 8 |  |  | 14850 | 80528 | 0.32 |
-| kv260 | tiny | 4 | onchip | 1 | 0.94 (128, chunk 128) | 0.49 | 5338 | 19923 | 0.33 |
-| kv260 | tiny | 4 | onchip | 4 |  |  | 16065 | 79694 | 0.25 |
-| kv260 | tiny | 4 | onchip | 8 |  |  | 24155 | 159388 | 0.19 |
-| kv260 | tiny | 4 | ddr | 1 | 1.25 (128, chunk 128) | 0.37 | 4747 | 19923 | 0.34 |
-| kv260 | tiny | 4 | ddr | 4 |  |  | 12476 | 79694 | 0.29 |
-| kv260 | tiny | 4 | ddr | 8 |  |  | 17122 | 159388 | 0.27 |
-| kv260 | shakespeare | 8 | onchip | 1 | 13.88 (256, chunk 128) | 0.83 | 333 | 752 | 0.46 |
+| kv260 | tiny | 8 | onchip | 1 | 1.60 (128, chunk 128) | 0.29 | 3651 | 10066 | 0.40 |
+| kv260 | tiny | 8 | onchip | 4 |  |  | 11252 | 40264 | 0.31 |
+| kv260 | tiny | 8 | onchip | 8 |  |  | 17106 | 80528 | 0.24 |
+| kv260 | tiny | 8 | ddr | 1 | 1.86 (128, chunk 128) | 0.25 | 3459 | 10066 | 0.41 |
+| kv260 | tiny | 8 | ddr | 4 |  |  | 9903 | 40264 | 0.35 |
+| kv260 | tiny | 8 | ddr | 8 |  |  | 14275 | 80528 | 0.31 |
+| kv260 | tiny | 4 | onchip | 1 | 1.64 (128, chunk 128) | 0.28 | 4783 | 19923 | 0.30 |
+| kv260 | tiny | 4 | onchip | 4 |  |  | 13178 | 79694 | 0.21 |
+| kv260 | tiny | 4 | onchip | 8 |  |  | 18628 | 159388 | 0.15 |
+| kv260 | tiny | 4 | ddr | 1 | 1.93 (128, chunk 128) | 0.24 | 4361 | 19923 | 0.31 |
+| kv260 | tiny | 4 | ddr | 4 |  |  | 11206 | 79694 | 0.26 |
+| kv260 | tiny | 4 | ddr | 8 |  |  | 15175 | 159388 | 0.24 |
+| kv260 | shakespeare | 8 | onchip | 1 | 17.61 (256, chunk 128) | 0.65 | 331 | 752 | 0.46 |
 | kv260 | shakespeare | 8 | onchip | 4 | KV does not fit | | | | |
 | kv260 | shakespeare | 8 | onchip | 8 | KV does not fit | | | | |
-| kv260 | shakespeare | 8 | ddr | 1 | 14.97 (256, chunk 128) | 0.77 | 323 | 752 | 0.47 |
-| kv260 | shakespeare | 8 | ddr | 4 |  |  | 1086 | 3007 | 0.45 |
-| kv260 | shakespeare | 8 | ddr | 8 |  |  | 1792 | 6014 | 0.44 |
-| kv260 | shakespeare | 4 | onchip | 1 | 14.15 (256, chunk 128) | 0.81 | 597 | 1500 | 0.44 |
+| kv260 | shakespeare | 8 | ddr | 1 | 18.37 (256, chunk 128) | 0.63 | 322 | 752 | 0.47 |
+| kv260 | shakespeare | 8 | ddr | 4 |  |  | 1082 | 3007 | 0.45 |
+| kv260 | shakespeare | 8 | ddr | 8 |  |  | 1781 | 6014 | 0.44 |
+| kv260 | shakespeare | 4 | onchip | 1 | 17.53 (256, chunk 128) | 0.66 | 592 | 1500 | 0.43 |
 | kv260 | shakespeare | 4 | onchip | 4 | KV does not fit | | | | |
 | kv260 | shakespeare | 4 | onchip | 8 | KV does not fit | | | | |
-| kv260 | shakespeare | 4 | ddr | 1 | 15.43 (256, chunk 128) | 0.75 | 565 | 1500 | 0.46 |
-| kv260 | shakespeare | 4 | ddr | 4 |  |  | 1700 | 6000 | 0.44 |
-| kv260 | shakespeare | 4 | ddr | 8 |  |  | 2553 | 12000 | 0.42 |
+| kv260 | shakespeare | 4 | ddr | 1 | 18.54 (256, chunk 128) | 0.62 | 563 | 1500 | 0.45 |
+| kv260 | shakespeare | 4 | ddr | 4 |  |  | 1685 | 6000 | 0.43 |
+| kv260 | shakespeare | 4 | ddr | 8 |  |  | 2511 | 12000 | 0.41 |
 | pynq-z2 | tiny | 8 | onchip | 1 | KV does not fit | | | | |
 | pynq-z2 | tiny | 8 | onchip | 4 | KV does not fit | | | | |
 | pynq-z2 | tiny | 8 | onchip | 8 | KV does not fit | | | | |
-| pynq-z2 | tiny | 8 | ddr | 1 | 4.73 (128, chunk 128) | 0.65 | 1143 | 1887 | 0.72 |
-| pynq-z2 | tiny | 8 | ddr | 4 |  |  | 3561 | 7550 | 0.68 |
-| pynq-z2 | tiny | 8 | ddr | 8 |  |  | 5500 | 15099 | 0.64 |
+| pynq-z2 | tiny | 8 | ddr | 1 | 5.24 (128, chunk 128) | 0.59 | 1131 | 1887 | 0.71 |
+| pynq-z2 | tiny | 8 | ddr | 4 |  |  | 3522 | 7550 | 0.67 |
+| pynq-z2 | tiny | 8 | ddr | 8 |  |  | 5432 | 15099 | 0.63 |
 | pynq-z2 | tiny | 4 | onchip | 1 | KV does not fit | | | | |
 | pynq-z2 | tiny | 4 | onchip | 4 | KV does not fit | | | | |
 | pynq-z2 | tiny | 4 | onchip | 8 | KV does not fit | | | | |
-| pynq-z2 | tiny | 4 | ddr | 1 | 4.90 (128, chunk 128) | 0.63 | 1725 | 3736 | 0.65 |
-| pynq-z2 | tiny | 4 | ddr | 4 |  |  | 4826 | 14943 | 0.61 |
-| pynq-z2 | tiny | 4 | ddr | 8 |  |  | 6884 | 29885 | 0.57 |
+| pynq-z2 | tiny | 4 | ddr | 1 | 5.39 (128, chunk 128) | 0.57 | 1676 | 3736 | 0.63 |
+| pynq-z2 | tiny | 4 | ddr | 4 |  |  | 4696 | 14943 | 0.59 |
+| pynq-z2 | tiny | 4 | ddr | 8 |  |  | 6667 | 29885 | 0.55 |
 | pynq-z2 | shakespeare | 8 | onchip | 1 | KV does not fit | | | | |
 | pynq-z2 | shakespeare | 8 | onchip | 4 | KV does not fit | | | | |
 | pynq-z2 | shakespeare | 8 | onchip | 8 | KV does not fit | | | | |
-| pynq-z2 | shakespeare | 8 | ddr | 1 | 86.52 (256, chunk 32) | 0.87 | 99 | 141 | 0.77 |
+| pynq-z2 | shakespeare | 8 | ddr | 1 | 90.69 (256, chunk 32) | 0.83 | 99 | 141 | 0.76 |
 | pynq-z2 | shakespeare | 8 | ddr | 4 |  |  | 339 | 564 | 0.76 |
-| pynq-z2 | shakespeare | 8 | ddr | 8 |  |  | 571 | 1128 | 0.75 |
+| pynq-z2 | shakespeare | 8 | ddr | 8 |  |  | 570 | 1128 | 0.75 |
 | pynq-z2 | shakespeare | 4 | onchip | 1 | KV does not fit | | | | |
 | pynq-z2 | shakespeare | 4 | onchip | 4 | KV does not fit | | | | |
 | pynq-z2 | shakespeare | 4 | onchip | 8 | KV does not fit | | | | |
-| pynq-z2 | shakespeare | 4 | ddr | 1 | 84.50 (256, chunk 32) | 0.89 | 176 | 281 | 0.76 |
-| pynq-z2 | shakespeare | 4 | ddr | 4 |  |  | 544 | 1125 | 0.75 |
-| pynq-z2 | shakespeare | 4 | ddr | 8 |  |  | 835 | 2250 | 0.73 |
+| pynq-z2 | shakespeare | 4 | ddr | 1 | 88.12 (256, chunk 32) | 0.86 | 175 | 281 | 0.75 |
+| pynq-z2 | shakespeare | 4 | ddr | 4 |  |  | 539 | 1125 | 0.74 |
+| pynq-z2 | shakespeare | 4 | ddr | 8 |  |  | 826 | 2250 | 0.72 |

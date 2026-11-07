@@ -66,10 +66,9 @@ def test_a1_02_simbackend_slot_assignment_is_as_audited():
 
 
 # ----------------------------------------------------------------------------- A1-01
-@pytest.mark.xfail(strict=True, reason="A1-01: cyclemodel prices VEC-queue streams at L=64 elements/cycle, but "
-                                       "vec_seq ports move one 16-byte line per cycle (4 int32 / 8 int16) and "
-                                       "REQUANT also reads N 16-byte records; KV260 prefill is up to ~2x optimistic")
 def test_a1_01_vec_cost_respects_line_ports():
+    """A1-01 (fixed): the cycle model prices VEC-engine streams at the 16-byte line ports
+    (4 int32 / 8 int16 per cycle) and REQUANT's N record lines."""
     L = KV260.lanes
     assert L == 64
     M, N = 16, 384
@@ -80,6 +79,39 @@ def test_a1_01_vec_cost_respects_line_ports():
     sm = isa.C("SOFTMAX_ONLINE", first=1, last=1, causal=1, src_addr=0, dst_addr=0, ctx_addr=0, rows=M,
                cols=256, diag=0, src_stride=64, dst_stride=16)
     assert cm.cost(sm, KV260)[0] >= M * math.ceil(4 * 256 / 16)
+
+
+PERF = ROOT / "bench" / "results" / "vec_seq_perf.json"
+
+
+def _doc_perf_table():
+    """docs/vector-unit.md §9.3 measured table: {shape name: (occ L=4, L=16, L=64)}."""
+    txt = (ROOT / "docs" / "vector-unit.md").read_text()
+    sec = txt[txt.index("### 9.3"):txt.index("### 9.4")]
+    out = {}
+    for line in sec.splitlines():
+        m = re.match(r"\| (.+?) \| (\d+) \| (\d+) \| (\d+) \|", line)
+        if m:
+            out[m.group(1)] = tuple(int(m.group(i)) for i in (2, 3, 4))
+    return out
+
+
+def test_a1_01_cyclemodel_pinned_to_measured_vec_seq():
+    """A1-01 (fixed): every VEC-engine shape measured on rtl/vec_seq.sv (bench/vec_seq_perf.py, L = 4 and
+    16 on Icarus, 64 on Verilator; table in docs/vector-unit.md §9.3) is within 5 % of cyclemodel.cost,
+    and the doc table equals the measurement file."""
+    data = json.loads(PERF.read_text())
+    assert sorted(data) == ["16", "4", "64"]
+    doc = _doc_perf_table()
+    assert len(doc) == len(data["4"]["rows"]) >= 30
+    for L, v in data.items():
+        hw = KV260.with_(lanes=int(L))
+        for r in v["rows"]:
+            assert doc[r["name"]][("4", "16", "64").index(L)] == r["occ"], (L, r["name"])
+            c = isa.C(r["op"], **r["f"])
+            resident = r["op"] in ("LN", "GELU", "SOFTMAX_ONLINE", "LUT_LOAD") and "miss" not in r["name"]
+            got = cm.cost(c, hw, resident=resident)[0]
+            assert abs(got / r["occ"] - 1) <= 0.05, (L, r["name"], got, r["occ"])
 
 
 # ----------------------------------------------------------------------------- A1-05 / A1-06
@@ -99,19 +131,50 @@ def test_a1_06_cyclemodel_now_matches_weight_bound_int8_tiles():
     assert cm.cost(c, KV260)[0] == meas
 
 
-@pytest.mark.xfail(strict=True, reason="A1-05: RTL (array_seq) sends the scale beat on every GEMM_GS tile; "
-                                       "cyclemodel/ADR-004 charge it only on the first tile of each group")
 @pytest.mark.parametrize("key", ["w4a8 GEMM_GS c_attn M16", "w4a8 GEMM_GS c_attn M1"])
 def test_a1_05_gemm_gs_scale_beat_per_tile(key):
     c, meas = MEASURED_N32[key]
     assert cm.cost(c, KV260)[0] == meas
 
 
-@pytest.mark.xfail(strict=True, reason="A1-05: ragged weight rows (LM head N=65) straddle the W-port window "
-                                       "and cost a second beat per row; cyclemodel ignores it (384 vs 624)")
 def test_a1_05_lm_head_ragged_rows():
     c, meas = MEASURED_N32["LM head ragged N=65"]
     assert cm.cost(c, KV260)[0] == meas
+
+
+ACCEPT_DONE_N32 = {   # docs/array.md §7 table, accept->done at N=32 (M16 / M1)
+    "c_attn": (dict(N=256, K=128), 1115, 1100),
+    "mlp proj": (dict(N=64, K=512), 1115, 1100),
+    "LM head": (dict(N=65, K=128), 715, 700),
+    "scores w_trans KVBUF": (dict(N=16, K=32, w_trans=1, w_buf=1), 139, None),
+    "P.V KVBUF": (dict(N=32, K=16, w_buf=1), 107, None),
+    "GEMM_GS c_attn": (dict(op="GEMM_GS", N=384, K=128, glog2=3), 1675, 1660),
+    "GEMM_GS fc": (dict(op="GEMM_GS", N=480, K=128, glog2=3), 2071, 2056),
+}
+
+
+@pytest.mark.parametrize("key", sorted(ACCEPT_DONE_N32))
+def test_a1_05_array_seq_accept_to_done(key):
+    """A1-05 (fixed): occupancy + latency = measured array_seq accept->done (2N+4 fill + 7 + M write-back,
+    + N/2 through the w_trans transposer), within 1 cycle."""
+    kw, m16, m1 = ACCEPT_DONE_N32[key]
+    kw = dict(kw)
+    op = kw.pop("op", "GEMM")
+    for M, meas in ((16, m16), (1, m1)):
+        if meas is None:
+            continue
+        occ, lat, _ = cm.cost(_gemm(op, M=M, **kw), KV260)
+        assert abs(occ + lat - meas) <= 1, (M, occ + lat, meas)
+
+
+def test_a1_05_ln_and_lut_load_fixed_costs():
+    """A1-05 (fixed): LN 1x128 at L=4 accept->done 134 (hit) / 185 (miss), LUT_LOAD 42 / 8 (docs/sfu.md §10)."""
+    hw4 = KV260.with_(lanes=4)
+    ln = isa.C("LN", in16=1, src_addr=0, dst_addr=0, param_addr=0, rows=1, cols=128, src_stride=16, dst_stride=8)
+    hit, miss = (sum(cm.cost(ln, hw4, resident=r)[:2]) for r in (True, False))
+    assert (hit, miss) == (134, 185)
+    lut = isa.C("LUT_LOAD", table=1, src_addr=512)
+    assert tuple(sum(cm.cost(lut, hw4, resident=r)[:2]) for r in (False, True)) == (42, 8)
 
 
 # ----------------------------------------------------------------------------- A1-09 coverage hole

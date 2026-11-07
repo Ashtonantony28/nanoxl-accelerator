@@ -298,6 +298,60 @@ KV260 (L = 64) SG7c should widen the ACC/ABUF ports or bank them (a parameterize
 is the natural extension of `vec_seq_rd/wr`). Measured (tiny W8A8, L = 4, random port ready
 80 %, latency 1–6): 6-token prefill + 1 decode step = 186 VEC-queue commands in 59k cycles.
 
+**Measured per-command occupancy** (AUDIT-1 A1-01; `python3 bench/vec_seq_perf.py`, module
+`bench/vec_seq_perf_cocotb.py`, raw data and command fields in `bench/results/vec_seq_perf.json`).
+Ports always ready, read latency 2, each shape run as two identical back-to-back commands;
+occupancy = done to done (the engine runs one command at a time, so this includes the drain),
+accept→done of a lone command is 1–3 cycles more. L = 4 and 16 on Icarus, L = 64 on Verilator,
+16-byte ports at every L (the RTL as built). The second command of a pair is a residency hit
+(LN block, GELU table, score record, LUT) except in the `miss` rows; every command is checked
+against funcsim by the shared harness.
+
+| shape | L = 4 | L = 16 | L = 64 |
+|---|---|---|---|
+| REQUANT M16 N384 | 1999 | 2001 | 2007 |
+| REQUANT M16 N128 | 681 | 682 | 685 |
+| REQUANT M1 N384 | 529 | 531 | 537 |
+| REQUANT M16 N256 out16 | 1321 | 1323 | 1329 |
+| REQUANT M16 N256 pt | 1065 | 1067 | 1070 |
+| REQUANT M4 N64 | 157 | 158 | 161 |
+| REQUANT M1 N65 | 108 | 109 | 112 |
+| SOFTMAX rows16 cols256 | 3393 | 1768 | 1171 |
+| SOFTMAX rows16 cols64 | 1089 | 616 | 388 |
+| SOFTMAX rows1 cols256 | 228 | 133 | 121 |
+| SOFTMAX rows16 cols16 | 513 | 373 | 373 |
+| SOFTMAX rows4 cols128 causal | 477 | 268 | 178 |
+| LN rows1 cols128 | 132 | 69 | 63 |
+| LN rows16 cols128 | 1857 | 804 | 483 |
+| LN rows16 cols128 in8 | 1857 | 706 | 475 |
+| LN rows1 cols384 | 324 | 133 | 115 |
+| LN rows16 cols384 | 4929 | 1828 | 1315 |
+| LN rows1 cols128 miss | 183 | 121 | 115 |
+| LN rows16 cols128 miss | 1909 | 856 | 535 |
+| GELU len512 | 151 | 56 | 59 |
+| GELU len128 | 54 | 32 | 35 |
+| GELU len2048 | 535 | 152 | 155 |
+| GELU len512 miss | 168 | 74 | 77 |
+| VEC ADD int8 len2048 | 526 | 143 | 146 |
+| VEC ADD int16 len2048 | 525 | 272 | 278 |
+| VEC ADD int32 len1024 | 271 | 274 | 286 |
+| VEC COPY int8 len2048 | 525 | 143 | 146 |
+| VEC ADD int8 len128 | 45 | 23 | 26 |
+| VEC ADD int8 len64 | 30 | 19 | 22 |
+| KV_APPEND rows16 heads4 dh32 | 589 | 206 | 207 |
+| KV_APPEND rows1 heads4 dh32 | 48 | 25 | 27 |
+| KV_APPEND rows16 heads6 dh64 | 1645 | 494 | 497 |
+| KV_APPEND rows1 heads6 dh64 | 115 | 44 | 47 |
+| LUT_LOAD hit | 6 | 6 | 6 |
+| LUT_LOAD miss | 40 | 40 | 40 |
+
+Reading the table: REQUANT costs the same at every L (int32 ACC rows at 4 elements per cycle,
+plus N record lines: M16 N384 = 384 + 16·(64 + 32) lines + 81 fixed); softmax and int16 LN rows
+are port-bound at L = 16 and 64; int8 streams reach 16 elements per cycle at L ≥ 16, so L = 64
+buys nothing over L = 16 with 16-byte ports. `nanoxl/cyclemodel.py` prices every row of this
+table within 5 % (`VEC_CAL`: the stream terms come from the port and lane widths, only the fixed
+per-command / per-row costs are fitted), pinned by `tests/audit/test_audit1.py::test_a1_01_*`.
+
 ### 9.4 Verification
 
 `SIM=icarus|verilator python3 -m pytest -q tests/rtl/test_vec_seq.py` (L = 4, 16; slow

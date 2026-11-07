@@ -3,7 +3,7 @@ queue / semaphore / fetch semantics, critical-path attribution and model-level s
 import pytest
 
 from nanoxl import isa
-from nanoxl.cyclemodel import (FIXES, MEASURED, ModelError, RtlTiming, cost, estimate, simulate,
+from nanoxl.cyclemodel import (FIXES, MEASURED, VEC_CAL, ModelError, RtlTiming, cost, estimate, simulate,
                                timing_for)
 from nanoxl.graph import SHAKESPEARE, TINY
 from nanoxl.hwconfig import KV260, PYNQ_Z2
@@ -37,9 +37,11 @@ def test_cyclemodel_dma_cost_measured():
 
 
 def test_cyclemodel_gemm_cost_measured():
-    hw = KV260  # N = 32: tile max(M, k), first output 2N + 4
+    hw = KV260  # N = 32: tile max(M, k); last input -> done 2N + 4 + 7 + M (array.md §7)
     occ, lat, info = cost(C("GEMM", M=256, N=64, K=96), hw)
-    assert occ == 2 * 3 * 256 and lat == 68 and info["macs"] == 256 * 64 * 96
+    assert occ == 2 * 3 * 256 and lat == 68 + 7 + 256 and info["macs"] == 256 * 64 * 96
+    assert cost(C("GEMM", M=300, N=32, K=32), hw)[0] == 256 + 44                 # M_DEPTH row chunks
+    assert cost(C("GEMM", M=1, N=32, K=32, w_trans=1), hw)[1] == 68 + 7 + 1 + 16  # transposer
     assert cost(C("GEMM", M=1, N=64, K=96, gemv=1), hw)[0] == 2 * 96          # GEMV: K rows per tile
     assert cost(C("GEMM", M=1, N=64, K=96, gemv=1, int4=1), hw)[0] == 2 * 96  # INT4: still 1 K-row / beat
     assert cost(C("GEMM", M=1, N=32, K=40, gemv=1), hw)[0] == 32 + 8          # ragged last K tile
@@ -48,39 +50,64 @@ def test_cyclemodel_gemm_cost_measured():
 
 
 def test_cyclemodel_gemm_gs_cost():
-    """ADR-004: one extra scale beat on the first K-tile of each group; hidden when M >= k + 1."""
+    """array_seq: every GEMM_GS tile carries its group's scale beat (AUDIT-1 A1-05; ADR-004 charged
+    only the first tile of a group); hidden when M >= k + 1."""
     hw = KV260
     occ_gs, lat, info = cost(C("GEMM_GS", M=1, N=64, K=128, glog2=3, gemv=1), hw)  # G = 64
-    assert occ_gs == 2 * (2 * 33 + 2 * 32) and lat == 68 and info["macs"] == 64 * 128
+    assert occ_gs == 2 * 4 * 33 and lat == 68 + 7 + 1 and info["macs"] == 64 * 128
+    first_only = cost(C("GEMM_GS", M=1, N=64, K=128, glog2=3), hw, MEASURED.with_(gs_beat_every_tile=False))[0]
+    assert first_only == 2 * (2 * 33 + 2 * 32)
     big_gs = cost(C("GEMM_GS", M=256, N=64, K=128, glog2=3), hw)[0]
     assert big_gs == cost(C("GEMM", M=256, N=64, K=128, int4=1), hw)[0]
     assert cost(C("GEMM_GS", M=1, N=32, K=128, glog2=1, gemv=1), hw)[0] == 8 * 17   # G = 16 < N
 
 
+def test_cyclemodel_ragged_weight_rows():
+    """A weight row that straddles the ceil(N/16)-line W window costs a second beat (LM head N=65:
+    624 measured at N=32, docs/array.md §7); a WPL+1 window (what-if) removes it."""
+    hw = KV260
+    lm = C("GEMM", M=16, N=65, K=128)
+    assert cost(lm, hw)[0] == 624
+    assert cost(lm, hw, MEASURED.with_(array_w_lines=3))[0] == 4 * 3 * 32       # weight-row bound: kt = 32 rows per tile
+
+
 def test_cyclemodel_sfu_costs_measured():
-    hw = KV260  # 64 lanes
-    nb = 6      # 384 / 64
-    blk = 2 + 384 // 8 + 384 // 4
-    assert cost(C("LN", rows=4, cols=384), hw)[0] == 4 * (1 + 3 * nb + 19) + blk
-    assert cost(C("LN", rows=4, cols=384), hw, resident=True)[0] == 4 * (1 + 3 * nb + 19)
-    assert cost(C("SOFTMAX_ONLINE", rows=2, cols=100, first=1, last=1), hw)[0] == 2 * (1 + 3 * 2 + 19) + 1
-    assert cost(C("LUT_LOAD", table=1), hw)[0] == 32
-    assert cost(C("GELU", len=640), hw)[0] == 1 + 10 + 16
-    assert cost(C("REQUANT", M=3, N=100), hw)[0] == 3 * (1 + 2)
-    # sfu.md examples at L = 4: LN d=384 307 cycles/row, SOFTMAX_RQ ctx 256 211 cycles/row (+accept)
+    """VEC-engine costs = port/lane stream + fitted fixed costs (VEC_CAL); the full comparison with
+    every measured shape is tests/audit (A1-01) against bench/results/vec_seq_perf.json."""
+    hw = KV260  # 64 lanes, 16-byte ports
+    cal = VEC_CAL[64]
+    H, Hw, f, F = cal["ln"]
+    nb, il = 6, 48                                   # LN 384 int16: 6 beats, 48 input lines
+    p1 = il - (8 + H)                              # one beat (8 lines) + H hidden behind the previous row
+    p3 = max(nb, 24 - Hw)
+    blk = (2 + 384 // 8 + 384 // 4) + 1
+    assert cost(C("LN", rows=4, cols=384, in16=1), hw, resident=True)[0] == F + 4 * (1 + p1 + nb + p3 + f)
+    assert cost(C("LN", rows=4, cols=384, in16=1), hw)[0] == F + 4 * (1 + p1 + nb + p3 + f) + blk
+    # REQUANT at L = 64 is port bound: 4 int32 per cycle and one record line per channel
+    rq = C("REQUANT", M=16, N=384)
+    assert cost(rq, hw)[0] == 384 + 2 * cal["rq_chunk"] + 16 * (1 + 64) + 16 * (1 + 32)
+    assert cost(C("REQUANT", M=16, N=384, per_tensor=1), hw)[0] == 2 + 2 * cal["rq_chunk"] + 16 * (65 + 33)
+    assert cost(C("LUT_LOAD", table=1), hw)[0] == 40
+    assert cost(C("LUT_LOAD", table=1), hw, resident=True)[0] == 6
+    assert cost(C("GELU", len=640), hw)[0] == cal["gelu"] + 1 + 40 + 17
+    assert cost(C("VEC", len=1000, dt_in=isa.DT_I32, dt_out=isa.DT_I32), hw)[0] == cal["vec"] + 1 + 250
+    # L = 4: lane bound everywhere; LN d=384 is 3 nb + 19 cycles per row (+ accept), as sfu.md §5
     hw4 = KV260.with_(lanes=4)
-    assert cost(C("LN", rows=1, cols=384), hw4, resident=True)[0] == 307 + 1
-    assert cost(C("SOFTMAX_ONLINE", rows=1, cols=256, first=1, last=1), hw4, resident=True)[0] == 211 + 1
+    H4, _, f4, F4 = VEC_CAL[4]["ln"]
+    assert cost(C("LN", rows=2, cols=384, in16=1), hw4, resident=True)[0] == F4 + 2 * (1 + 3 * 96 + f4)
+    # wider ports (what-if) remove the port bound at L = 64
+    w4 = MEASURED.with_(vec_port_lines=4)
+    assert cost(rq, hw, w4)[0] < 0.4 * cost(rq, hw)[0]
     # ping-pong row buffer (what-if) overlaps pass 1 of the next row
-    pp = cost(C("LN", rows=4, cols=384), hw, MEASURED.with_(sfu_row_buffers=2), resident=True)[0]
-    assert pp == 4 * (1 + 2 * nb + 19) + nb
+    pp = cost(C("LN", rows=4, cols=384, in16=1), hw, MEASURED.with_(sfu_row_buffers=2), resident=True)[0]
+    assert pp < cost(C("LN", rows=4, cols=384, in16=1), hw, resident=True)[0]
 
 
 def test_cyclemodel_ln_block_residency():
     """An LN block stays resident per PBUF address until a DMA writes that range."""
     hw = KV260
     ln = C("LN", rows=1, cols=384, param_addr=0)
-    blk = 2 + 48 + 96
+    blk = 2 + 48 + 96 + 1
     one = simulate([ln, C("END")], hw).busy["vec"]
     two = simulate([ln, ln, C("END")], hw).busy["vec"]
     assert two == 2 * one - blk
@@ -124,7 +151,7 @@ def test_cyclemodel_rejects_wait_before_signal():
 def test_cyclemodel_command_fetch_over_axi():
     """Fetch: 8-word bursts, one in flight: n cheap words cost ~ n/8 x (latency + 8) cycles."""
     hw = KV260
-    cmds = [C("VEC", len=1)] * 64 + [C("END")]
+    cmds = [C("GEMM", M=1, N=1, K=1)] * 64 + [C("END")]
     t = simulate(cmds, hw, trace=True)
     bursts = -(-65 // 8)
     assert t.cycles >= (bursts - 1) * (LAT + 8) + LAT
@@ -163,14 +190,25 @@ def shk():
 def test_cyclemodel_shakespeare_measured(shk):
     """As built (wave 2 RTL + coalesced compiler DMAs), KV260 INT8 decode is bound by the single
     128-bit DMA master (16 B/cycle = 4 GB/s at 250 MHz), half the 8 GB/s board assumption: the
-    critical path is almost all weight DMA. Prefill is array bound."""
+    critical path is almost all weight DMA. Prefill is mostly array bound; with the VEC engine priced at
+    its 16-byte line ports (AUDIT-1 A1-01) the array is ~65 % busy, still above G3's 50 %."""
     assert shk["fits"]
     port_bound = 16 * KV260.clock_hz / SHAKESPEARE.weight_bytes
     assert 0.85 * port_bound < shk["decode_tok_s"] <= port_bound
     assert shk["decode_tok_s"] < 0.55 * shk["weight_bound_tok_s"]
     assert shk["decode_critical"]["dma weights"] > 0.85 * shk["decode_cycles"]
     assert shk["prefill_critical"]["gemm linear"] > 0.6 * shk["prefill_cycles"]
-    assert shk["prefill_array_util"] > 0.7
+    assert 0.5 < shk["prefill_array_util"] < 0.75
+    assert shk["prefill_critical"]["softmax"] > 0.08 * shk["prefill_cycles"]   # int32 scores, 4 per cycle
+
+
+def test_cyclemodel_vec_port_widening_restores_prefill(shk):
+    """What-if (ADR-003 AUDIT-1 update): 4-line (64-byte) VEC engine ports bring KV260 prefill back
+    near the lane-rate model (~0.8 array utilization); decode does not move."""
+    tm = timing_for(KV260).with_(**FIXES["4-line (64 B) VEC engine ports"])
+    w = estimate(SHAKESPEARE, KV260, n_pos=3, tm=tm)
+    assert w["prefill_array_util"] > 0.75 and w["prefill_ms"] < 0.9 * shk["prefill_ms"]
+    assert abs(w["decode_tok_s"] / shk["decode_tok_s"] - 1) < 0.01
 
 
 def test_cyclemodel_fixes_order(shk):

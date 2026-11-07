@@ -1,0 +1,1916 @@
+{
+ "4": {
+  "sim": "icarus",
+  "rows": [
+   {
+    "name": "REQUANT M16 N384",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 2001,
+    "occ": 1999,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 38800,
+     "dst_addr": 275088,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N128",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 683,
+    "occ": 681,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 72128,
+     "dst_addr": 371856,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 128,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "REQUANT M1 N384",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 531,
+    "occ": 529,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 62384,
+     "dst_addr": 490768,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 out16",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 1323,
+    "occ": 1321,
+    "f": {
+     "out16": 1,
+     "per_tensor": 0,
+     "src_addr": 10608,
+     "dst_addr": 336320,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 32
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 pt",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 1068,
+    "occ": 1065,
+    "f": {
+     "out16": 0,
+     "per_tensor": 1,
+     "src_addr": 90384,
+     "dst_addr": 350112,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "REQUANT M4 N64",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 159,
+    "occ": 157,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 101360,
+     "dst_addr": 336560,
+     "param_addr": 32768,
+     "M": 4,
+     "N": 64,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "REQUANT M1 N65",
+    "op": "REQUANT",
+    "L": 4,
+    "lat": 2,
+    "first": 110,
+    "occ": 108,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 54240,
+     "dst_addr": 518448,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 65,
+     "src_stride": 17,
+     "dst_stride": 5
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 4,
+    "lat": 2,
+    "first": 3398,
+    "occ": 3393,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 96688,
+     "dst_addr": 327120,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols64",
+    "op": "SOFTMAX_ONLINE",
+    "L": 4,
+    "lat": 2,
+    "first": 1091,
+    "occ": 1089,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 119056,
+     "dst_addr": 330800,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 64,
+     "diag": 0,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "SOFTMAX rows1 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 4,
+    "lat": 2,
+    "first": 230,
+    "occ": 228,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 27632,
+     "dst_addr": 487840,
+     "ctx_addr": 6144,
+     "rows": 1,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols16",
+    "op": "SOFTMAX_ONLINE",
+    "L": 4,
+    "lat": 2,
+    "first": 514,
+    "occ": 513,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 90160,
+     "dst_addr": 282832,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 16,
+     "diag": 0,
+     "src_stride": 4,
+     "dst_stride": 1
+    }
+   },
+   {
+    "name": "SOFTMAX rows4 cols128 causal",
+    "op": "SOFTMAX_ONLINE",
+    "L": 4,
+    "lat": 2,
+    "first": 479,
+    "occ": 477,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 1,
+     "src_addr": 50304,
+     "dst_addr": 383904,
+     "ctx_addr": 6144,
+     "rows": 4,
+     "cols": 128,
+     "diag": 0,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols128",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 186,
+    "occ": 132,
+    "f": {
+     "in16": 1,
+     "src_addr": 195344,
+     "dst_addr": 283136,
+     "param_addr": 8192,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 1859,
+    "occ": 1857,
+    "f": {
+     "in16": 1,
+     "src_addr": 168192,
+     "dst_addr": 489904,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 in8",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 1858,
+    "occ": 1857,
+    "f": {
+     "in16": 0,
+     "src_addr": 111664,
+     "dst_addr": 417600,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 8,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols384",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 474,
+    "occ": 324,
+    "f": {
+     "in16": 1,
+     "src_addr": 257728,
+     "dst_addr": 417664,
+     "param_addr": 20192,
+     "rows": 1,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows16 cols384",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 4931,
+    "occ": 4929,
+    "f": {
+     "in16": 1,
+     "src_addr": 51664,
+     "dst_addr": 444576,
+     "param_addr": 20192,
+     "rows": 16,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows1 cols128 miss",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 185,
+    "occ": 183,
+    "f": {
+     "in16": 1,
+     "src_addr": 142608,
+     "dst_addr": 326560,
+     "param_addr": 10592,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 miss",
+    "op": "LN",
+    "L": 4,
+    "lat": 2,
+    "first": 1910,
+    "occ": 1909,
+    "f": {
+     "in16": 1,
+     "src_addr": 37584,
+     "dst_addr": 413520,
+     "param_addr": 10592,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "GELU len512",
+    "op": "GELU",
+    "L": 4,
+    "lat": 2,
+    "first": 170,
+    "occ": 151,
+    "f": {
+     "src_addr": 65184,
+     "dst_addr": 263536,
+     "lut_addr": 4096,
+     "len": 512
+    }
+   },
+   {
+    "name": "GELU len128",
+    "op": "GELU",
+    "L": 4,
+    "lat": 2,
+    "first": 57,
+    "occ": 54,
+    "f": {
+     "src_addr": 219904,
+     "dst_addr": 301968,
+     "lut_addr": 4096,
+     "len": 128
+    }
+   },
+   {
+    "name": "GELU len2048",
+    "op": "GELU",
+    "L": 4,
+    "lat": 2,
+    "first": 536,
+    "occ": 535,
+    "f": {
+     "src_addr": 37824,
+     "dst_addr": 498000,
+     "lut_addr": 4096,
+     "len": 2048
+    }
+   },
+   {
+    "name": "GELU len512 miss",
+    "op": "GELU",
+    "L": 4,
+    "lat": 2,
+    "first": 170,
+    "occ": 168,
+    "f": {
+     "len": 512
+    }
+   },
+   {
+    "name": "VEC ADD int8 len2048",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 528,
+    "occ": 526,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 173648,
+     "src1_buf": 2,
+     "src1_addr": 75872,
+     "dst_buf": 0,
+     "dst_addr": 325920,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int16 len2048",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 528,
+    "occ": 525,
+    "f": {
+     "vop": 1,
+     "dt_in": 1,
+     "dt_out": 1,
+     "src0_buf": 0,
+     "src0_addr": 232272,
+     "src1_buf": 2,
+     "src1_addr": 46880,
+     "dst_buf": 0,
+     "dst_addr": 517776,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int32 len1024",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 273,
+    "occ": 271,
+    "f": {
+     "vop": 1,
+     "dt_in": 2,
+     "dt_out": 2,
+     "src0_buf": 0,
+     "src0_addr": 42416,
+     "src1_buf": 2,
+     "src1_addr": 51136,
+     "dst_buf": 0,
+     "dst_addr": 389760,
+     "len": 1024,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC COPY int8 len2048",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 527,
+    "occ": 525,
+    "f": {
+     "vop": 0,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 196608,
+     "src1_buf": 2,
+     "src1_addr": 36816,
+     "dst_buf": 0,
+     "dst_addr": 291872,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len128",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 48,
+    "occ": 45,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 142800,
+     "src1_buf": 2,
+     "src1_addr": 90176,
+     "dst_buf": 0,
+     "dst_addr": 273312,
+     "len": 128,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len64",
+    "op": "VEC",
+    "L": 4,
+    "lat": 2,
+    "first": 32,
+    "occ": 30,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 231504,
+     "src1_buf": 2,
+     "src1_addr": 70704,
+     "dst_buf": 0,
+     "dst_addr": 420864,
+     "len": 64,
+     "imm": 0
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 4,
+    "lat": 2,
+    "first": 591,
+    "occ": 589,
+    "f": {
+     "src_addr": 230592,
+     "dst_addr": 1380736,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 4,
+    "lat": 2,
+    "first": 51,
+    "occ": 48,
+    "f": {
+     "src_addr": 130464,
+     "dst_addr": 1487632,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 4,
+    "lat": 2,
+    "first": 1647,
+    "occ": 1645,
+    "f": {
+     "src_addr": 125264,
+     "dst_addr": 1506848,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 4,
+    "lat": 2,
+    "first": 116,
+    "occ": 115,
+    "f": {
+     "src_addr": 115184,
+     "dst_addr": 1344576,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "LUT_LOAD hit",
+    "op": "LUT_LOAD",
+    "L": 4,
+    "lat": 2,
+    "first": 8,
+    "occ": 6,
+    "f": {}
+   },
+   {
+    "name": "LUT_LOAD miss",
+    "op": "LUT_LOAD",
+    "L": 4,
+    "lat": 2,
+    "first": 42,
+    "occ": 40,
+    "f": {}
+   }
+  ]
+ },
+ "16": {
+  "sim": "icarus",
+  "rows": [
+   {
+    "name": "REQUANT M16 N384",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 2003,
+    "occ": 2001,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 12112,
+     "dst_addr": 274032,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N128",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 684,
+    "occ": 682,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 119136,
+     "dst_addr": 269616,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 128,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "REQUANT M1 N384",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 533,
+    "occ": 531,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 10704,
+     "dst_addr": 283872,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 out16",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 1325,
+    "occ": 1323,
+    "f": {
+     "out16": 1,
+     "per_tensor": 0,
+     "src_addr": 96080,
+     "dst_addr": 424528,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 32
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 pt",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 1068,
+    "occ": 1067,
+    "f": {
+     "out16": 0,
+     "per_tensor": 1,
+     "src_addr": 25376,
+     "dst_addr": 371024,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "REQUANT M4 N64",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 160,
+    "occ": 158,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 109280,
+     "dst_addr": 328560,
+     "param_addr": 32768,
+     "M": 4,
+     "N": 64,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "REQUANT M1 N65",
+    "op": "REQUANT",
+    "L": 16,
+    "lat": 2,
+    "first": 111,
+    "occ": 109,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 10768,
+     "dst_addr": 395568,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 65,
+     "src_stride": 17,
+     "dst_stride": 5
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 16,
+    "lat": 2,
+    "first": 1773,
+    "occ": 1768,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 67440,
+     "dst_addr": 498784,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols64",
+    "op": "SOFTMAX_ONLINE",
+    "L": 16,
+    "lat": 2,
+    "first": 618,
+    "occ": 616,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 114160,
+     "dst_addr": 451424,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 64,
+     "diag": 0,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "SOFTMAX rows1 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 16,
+    "lat": 2,
+    "first": 135,
+    "occ": 133,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 101760,
+     "dst_addr": 317440,
+     "ctx_addr": 6144,
+     "rows": 1,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols16",
+    "op": "SOFTMAX_ONLINE",
+    "L": 16,
+    "lat": 2,
+    "first": 375,
+    "occ": 373,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 123744,
+     "dst_addr": 323088,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 16,
+     "diag": 0,
+     "src_stride": 4,
+     "dst_stride": 1
+    }
+   },
+   {
+    "name": "SOFTMAX rows4 cols128 causal",
+    "op": "SOFTMAX_ONLINE",
+    "L": 16,
+    "lat": 2,
+    "first": 270,
+    "occ": 268,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 1,
+     "src_addr": 13760,
+     "dst_addr": 287664,
+     "ctx_addr": 6144,
+     "rows": 4,
+     "cols": 128,
+     "diag": 0,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols128",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 123,
+    "occ": 69,
+    "f": {
+     "in16": 1,
+     "src_addr": 219504,
+     "dst_addr": 424176,
+     "param_addr": 8192,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 806,
+    "occ": 804,
+    "f": {
+     "in16": 1,
+     "src_addr": 30752,
+     "dst_addr": 479760,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 in8",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 708,
+    "occ": 706,
+    "f": {
+     "in16": 0,
+     "src_addr": 80192,
+     "dst_addr": 449408,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 8,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols384",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 283,
+    "occ": 133,
+    "f": {
+     "in16": 1,
+     "src_addr": 90592,
+     "dst_addr": 263840,
+     "param_addr": 20192,
+     "rows": 1,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows16 cols384",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 1830,
+    "occ": 1828,
+    "f": {
+     "in16": 1,
+     "src_addr": 47408,
+     "dst_addr": 373088,
+     "param_addr": 20192,
+     "rows": 16,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows1 cols128 miss",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 123,
+    "occ": 121,
+    "f": {
+     "in16": 1,
+     "src_addr": 204624,
+     "dst_addr": 428512,
+     "param_addr": 10592,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 miss",
+    "op": "LN",
+    "L": 16,
+    "lat": 2,
+    "first": 858,
+    "occ": 856,
+    "f": {
+     "in16": 1,
+     "src_addr": 230752,
+     "dst_addr": 514992,
+     "param_addr": 10592,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "GELU len512",
+    "op": "GELU",
+    "L": 16,
+    "lat": 2,
+    "first": 76,
+    "occ": 56,
+    "f": {
+     "src_addr": 133952,
+     "dst_addr": 390064,
+     "lut_addr": 4096,
+     "len": 512
+    }
+   },
+   {
+    "name": "GELU len128",
+    "op": "GELU",
+    "L": 16,
+    "lat": 2,
+    "first": 34,
+    "occ": 32,
+    "f": {
+     "src_addr": 73808,
+     "dst_addr": 398016,
+     "lut_addr": 4096,
+     "len": 128
+    }
+   },
+   {
+    "name": "GELU len2048",
+    "op": "GELU",
+    "L": 16,
+    "lat": 2,
+    "first": 154,
+    "occ": 152,
+    "f": {
+     "src_addr": 39408,
+     "dst_addr": 354432,
+     "lut_addr": 4096,
+     "len": 2048
+    }
+   },
+   {
+    "name": "GELU len512 miss",
+    "op": "GELU",
+    "L": 16,
+    "lat": 2,
+    "first": 76,
+    "occ": 74,
+    "f": {
+     "len": 512
+    }
+   },
+   {
+    "name": "VEC ADD int8 len2048",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 145,
+    "occ": 143,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 183440,
+     "src1_buf": 2,
+     "src1_addr": 85216,
+     "dst_buf": 0,
+     "dst_addr": 301488,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int16 len2048",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 274,
+    "occ": 272,
+    "f": {
+     "vop": 1,
+     "dt_in": 1,
+     "dt_out": 1,
+     "src0_buf": 0,
+     "src0_addr": 77280,
+     "src1_buf": 2,
+     "src1_addr": 94368,
+     "dst_buf": 0,
+     "dst_addr": 311056,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int32 len1024",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 276,
+    "occ": 274,
+    "f": {
+     "vop": 1,
+     "dt_in": 2,
+     "dt_out": 2,
+     "src0_buf": 0,
+     "src0_addr": 90800,
+     "src1_buf": 2,
+     "src1_addr": 95856,
+     "dst_buf": 0,
+     "dst_addr": 413888,
+     "len": 1024,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC COPY int8 len2048",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 145,
+    "occ": 143,
+    "f": {
+     "vop": 0,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 195920,
+     "src1_buf": 2,
+     "src1_addr": 28448,
+     "dst_buf": 0,
+     "dst_addr": 355904,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len128",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 25,
+    "occ": 23,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 44912,
+     "src1_buf": 2,
+     "src1_addr": 56096,
+     "dst_buf": 0,
+     "dst_addr": 412176,
+     "len": 128,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len64",
+    "op": "VEC",
+    "L": 16,
+    "lat": 2,
+    "first": 21,
+    "occ": 19,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 242368,
+     "src1_buf": 2,
+     "src1_addr": 87136,
+     "dst_buf": 0,
+     "dst_addr": 431488,
+     "len": 64,
+     "imm": 0
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 16,
+    "lat": 2,
+    "first": 208,
+    "occ": 206,
+    "f": {
+     "src_addr": 201392,
+     "dst_addr": 975472,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 16,
+    "lat": 2,
+    "first": 28,
+    "occ": 25,
+    "f": {
+     "src_addr": 31552,
+     "dst_addr": 1392112,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 16,
+    "lat": 2,
+    "first": 496,
+    "occ": 494,
+    "f": {
+     "src_addr": 188800,
+     "dst_addr": 1414832,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 16,
+    "lat": 2,
+    "first": 46,
+    "occ": 44,
+    "f": {
+     "src_addr": 47072,
+     "dst_addr": 1324640,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "LUT_LOAD hit",
+    "op": "LUT_LOAD",
+    "L": 16,
+    "lat": 2,
+    "first": 8,
+    "occ": 6,
+    "f": {}
+   },
+   {
+    "name": "LUT_LOAD miss",
+    "op": "LUT_LOAD",
+    "L": 16,
+    "lat": 2,
+    "first": 42,
+    "occ": 40,
+    "f": {}
+   }
+  ]
+ },
+ "64": {
+  "sim": "verilator",
+  "rows": [
+   {
+    "name": "REQUANT M16 N384",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 2009,
+    "occ": 2007,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 69712,
+     "dst_addr": 480432,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N128",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 687,
+    "occ": 685,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 86608,
+     "dst_addr": 325968,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 128,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "REQUANT M1 N384",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 539,
+    "occ": 537,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 17040,
+     "dst_addr": 414752,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 384,
+     "src_stride": 96,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 out16",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 1331,
+    "occ": 1329,
+    "f": {
+     "out16": 1,
+     "per_tensor": 0,
+     "src_addr": 45696,
+     "dst_addr": 439056,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 32
+    }
+   },
+   {
+    "name": "REQUANT M16 N256 pt",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 1072,
+    "occ": 1070,
+    "f": {
+     "out16": 0,
+     "per_tensor": 1,
+     "src_addr": 61584,
+     "dst_addr": 366208,
+     "param_addr": 32768,
+     "M": 16,
+     "N": 256,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "REQUANT M4 N64",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 163,
+    "occ": 161,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 12400,
+     "dst_addr": 385776,
+     "param_addr": 32768,
+     "M": 4,
+     "N": 64,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "REQUANT M1 N65",
+    "op": "REQUANT",
+    "L": 64,
+    "lat": 2,
+    "first": 114,
+    "occ": 112,
+    "f": {
+     "out16": 0,
+     "per_tensor": 0,
+     "src_addr": 98208,
+     "dst_addr": 304704,
+     "param_addr": 32768,
+     "M": 1,
+     "N": 65,
+     "src_stride": 17,
+     "dst_stride": 5
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 64,
+    "lat": 2,
+    "first": 1175,
+    "occ": 1171,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 31040,
+     "dst_addr": 511952,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols64",
+    "op": "SOFTMAX_ONLINE",
+    "L": 64,
+    "lat": 2,
+    "first": 390,
+    "occ": 388,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 63440,
+     "dst_addr": 374832,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 64,
+     "diag": 0,
+     "src_stride": 16,
+     "dst_stride": 4
+    }
+   },
+   {
+    "name": "SOFTMAX rows1 cols256",
+    "op": "SOFTMAX_ONLINE",
+    "L": 64,
+    "lat": 2,
+    "first": 123,
+    "occ": 121,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 126704,
+     "dst_addr": 423712,
+     "ctx_addr": 6144,
+     "rows": 1,
+     "cols": 256,
+     "diag": 0,
+     "src_stride": 64,
+     "dst_stride": 16
+    }
+   },
+   {
+    "name": "SOFTMAX rows16 cols16",
+    "op": "SOFTMAX_ONLINE",
+    "L": 64,
+    "lat": 2,
+    "first": 375,
+    "occ": 373,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 0,
+     "src_addr": 72224,
+     "dst_addr": 326256,
+     "ctx_addr": 6144,
+     "rows": 16,
+     "cols": 16,
+     "diag": 0,
+     "src_stride": 4,
+     "dst_stride": 1
+    }
+   },
+   {
+    "name": "SOFTMAX rows4 cols128 causal",
+    "op": "SOFTMAX_ONLINE",
+    "L": 64,
+    "lat": 2,
+    "first": 180,
+    "occ": 178,
+    "f": {
+     "first": 1,
+     "last": 1,
+     "causal": 1,
+     "src_addr": 110560,
+     "dst_addr": 485664,
+     "ctx_addr": 6144,
+     "rows": 4,
+     "cols": 128,
+     "diag": 0,
+     "src_stride": 32,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols128",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 117,
+    "occ": 63,
+    "f": {
+     "in16": 1,
+     "src_addr": 69200,
+     "dst_addr": 457872,
+     "param_addr": 8192,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 485,
+    "occ": 483,
+    "f": {
+     "in16": 1,
+     "src_addr": 49008,
+     "dst_addr": 453568,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 in8",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 477,
+    "occ": 475,
+    "f": {
+     "in16": 0,
+     "src_addr": 23408,
+     "dst_addr": 403216,
+     "param_addr": 8192,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 8,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows1 cols384",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 265,
+    "occ": 115,
+    "f": {
+     "in16": 1,
+     "src_addr": 218656,
+     "dst_addr": 449280,
+     "param_addr": 20192,
+     "rows": 1,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows16 cols384",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 1317,
+    "occ": 1315,
+    "f": {
+     "in16": 1,
+     "src_addr": 187152,
+     "dst_addr": 362816,
+     "param_addr": 20192,
+     "rows": 16,
+     "cols": 384,
+     "src_stride": 48,
+     "dst_stride": 24
+    }
+   },
+   {
+    "name": "LN rows1 cols128 miss",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 117,
+    "occ": 115,
+    "f": {
+     "in16": 1,
+     "src_addr": 175408,
+     "dst_addr": 442480,
+     "param_addr": 10592,
+     "rows": 1,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "LN rows16 cols128 miss",
+    "op": "LN",
+    "L": 64,
+    "lat": 2,
+    "first": 537,
+    "occ": 535,
+    "f": {
+     "in16": 1,
+     "src_addr": 206896,
+     "dst_addr": 396176,
+     "param_addr": 10592,
+     "rows": 16,
+     "cols": 128,
+     "src_stride": 16,
+     "dst_stride": 8
+    }
+   },
+   {
+    "name": "GELU len512",
+    "op": "GELU",
+    "L": 64,
+    "lat": 2,
+    "first": 79,
+    "occ": 59,
+    "f": {
+     "src_addr": 101008,
+     "dst_addr": 322144,
+     "lut_addr": 4096,
+     "len": 512
+    }
+   },
+   {
+    "name": "GELU len128",
+    "op": "GELU",
+    "L": 64,
+    "lat": 2,
+    "first": 37,
+    "occ": 35,
+    "f": {
+     "src_addr": 42384,
+     "dst_addr": 283280,
+     "lut_addr": 4096,
+     "len": 128
+    }
+   },
+   {
+    "name": "GELU len2048",
+    "op": "GELU",
+    "L": 64,
+    "lat": 2,
+    "first": 157,
+    "occ": 155,
+    "f": {
+     "src_addr": 37472,
+     "dst_addr": 394864,
+     "lut_addr": 4096,
+     "len": 2048
+    }
+   },
+   {
+    "name": "GELU len512 miss",
+    "op": "GELU",
+    "L": 64,
+    "lat": 2,
+    "first": 79,
+    "occ": 77,
+    "f": {
+     "len": 512
+    }
+   },
+   {
+    "name": "VEC ADD int8 len2048",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 148,
+    "occ": 146,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 240736,
+     "src1_buf": 2,
+     "src1_addr": 118048,
+     "dst_buf": 0,
+     "dst_addr": 514288,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int16 len2048",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 280,
+    "occ": 278,
+    "f": {
+     "vop": 1,
+     "dt_in": 1,
+     "dt_out": 1,
+     "src0_buf": 0,
+     "src0_addr": 1664,
+     "src1_buf": 2,
+     "src1_addr": 2256,
+     "dst_buf": 0,
+     "dst_addr": 470288,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int32 len1024",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 288,
+    "occ": 286,
+    "f": {
+     "vop": 1,
+     "dt_in": 2,
+     "dt_out": 2,
+     "src0_buf": 0,
+     "src0_addr": 227232,
+     "src1_buf": 2,
+     "src1_addr": 116048,
+     "dst_buf": 0,
+     "dst_addr": 298416,
+     "len": 1024,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC COPY int8 len2048",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 148,
+    "occ": 146,
+    "f": {
+     "vop": 0,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 70800,
+     "src1_buf": 2,
+     "src1_addr": 2960,
+     "dst_buf": 0,
+     "dst_addr": 362752,
+     "len": 2048,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len128",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 28,
+    "occ": 26,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 288,
+     "src1_buf": 2,
+     "src1_addr": 35920,
+     "dst_buf": 0,
+     "dst_addr": 396848,
+     "len": 128,
+     "imm": 0
+    }
+   },
+   {
+    "name": "VEC ADD int8 len64",
+    "op": "VEC",
+    "L": 64,
+    "lat": 2,
+    "first": 24,
+    "occ": 22,
+    "f": {
+     "vop": 1,
+     "dt_in": 0,
+     "dt_out": 0,
+     "src0_buf": 0,
+     "src0_addr": 30128,
+     "src1_buf": 2,
+     "src1_addr": 25632,
+     "dst_buf": 0,
+     "dst_addr": 307920,
+     "len": 64,
+     "imm": 0
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 64,
+    "lat": 2,
+    "first": 209,
+    "occ": 207,
+    "f": {
+     "src_addr": 134416,
+     "dst_addr": 1523296,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads4 dh32",
+    "op": "KV_APPEND",
+    "L": 64,
+    "lat": 2,
+    "first": 29,
+    "occ": 27,
+    "f": {
+     "src_addr": 36880,
+     "dst_addr": 1359568,
+     "pos": 0,
+     "heads": 4,
+     "dh": 32,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 8
+    }
+   },
+   {
+    "name": "KV_APPEND rows16 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 64,
+    "lat": 2,
+    "first": 499,
+    "occ": 497,
+    "f": {
+     "src_addr": 100512,
+     "dst_addr": 967232,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 16,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "KV_APPEND rows1 heads6 dh64",
+    "op": "KV_APPEND",
+    "L": 64,
+    "lat": 2,
+    "first": 49,
+    "occ": 47,
+    "f": {
+     "src_addr": 11712,
+     "dst_addr": 929680,
+     "pos": 0,
+     "heads": 6,
+     "dh": 64,
+     "ctx": 64,
+     "rows": 1,
+     "src_stride": 24
+    }
+   },
+   {
+    "name": "LUT_LOAD hit",
+    "op": "LUT_LOAD",
+    "L": 64,
+    "lat": 2,
+    "first": 8,
+    "occ": 6,
+    "f": {}
+   },
+   {
+    "name": "LUT_LOAD miss",
+    "op": "LUT_LOAD",
+    "L": 64,
+    "lat": 2,
+    "first": 42,
+    "occ": 40,
+    "f": {}
+   }
+  ]
+ }
+}

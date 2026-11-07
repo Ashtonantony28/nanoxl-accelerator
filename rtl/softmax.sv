@@ -25,14 +25,22 @@
 // sticky err_len flag; it still produces one output beat per input beat, but its data is
 // unspecified. Tables (exp2, recip) are written one PBUF line (8 entries) per cycle.
 //
-// Timing (docs/sfu.md §4), nb = ceil(len/L): nb cycles to stream in (+6 for the requant
-// pipeline when in_rq = 1), nb + 3 for pass 2, 5 for RECIP, nb + 5 for pass 3 (out_ready = 1);
-// the next row streams in after that: 3*nb + 13 cycles per row (3*nb + 19 with in_rq).
-// Output backpressure stalls pass 3 only.
+// Score requant lanes (docs/fpga.md §2.3 C6): the requant front end has RQL lanes (RQL
+// divides L). With RQL < L an int32 beat is requantized as R = L/RQL sub-beats on
+// consecutive cycles (sub-beat 0 straight from in_data, the others from a shift register)
+// and reassembled before the row buffer, so an in_rq row streams in at one beat per R
+// cycles (in_ready low for the R-1 cycles after each accept). Results and clamp counts are
+// unchanged (the clamps of a beat are counted over its sub-beats).
+//
+// Timing (docs/sfu.md §4), nb = ceil(len/L): nb cycles to stream in (R*nb when in_rq = 1,
+// +6 for the requant pipeline), nb + 3 for pass 2, 5 for RECIP, nb + 5 for pass 3
+// (out_ready = 1); the next row streams in after that: 3*nb + 13 cycles per row
+// ((R+2)*nb + 19 with in_rq). Output backpressure stalls pass 3 only.
 module softmax #(
     parameter int L       = 4,
     parameter int CTX_MAX = 256,
-    parameter int NCTX    = 8       // score-record slots (one per attention layer)
+    parameter int NCTX    = 8,      // score-record slots (one per attention layer)
+    parameter int RQL     = L       // score requant lanes (divides L)
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -66,6 +74,9 @@ module softmax #(
     localparam int SW  = 16 + $clog2(CTX_MAX + 1) + 1;     // sum of <= CTX_MAX 16-bit e's
     localparam int CW  = 16;                               // beat counter width
     localparam int CSW = (NCTX > 1) ? $clog2(NCTX) : 1;
+    localparam int R   = L / RQL;                          // requant sub-beats per beat
+    localparam int RW  = (R > 1) ? $clog2(R) : 1;
+    localparam int HL  = (R > 1) ? L - RQL : RQL;          // lanes held for sub-beats 1..R-1
 
     typedef enum logic [2:0] {S_IN, S_DR, S_P2, S_RCP, S_P3} state_t;
     state_t st;
@@ -90,37 +101,118 @@ module softmax #(
     logic            m_rq;             // row mode (latched at the first beat)
     logic [15:0]     m_nkeep;
     logic            cur_rq;
+    logic [RW-1:0]   pend;             // requant sub-beats still to issue from the hold register
     assign cur_rq   = inrow ? m_rq : in_rq;
-    assign in_ready = (st == S_IN) && (!cur_rq || rq_in_ready);
+    assign in_ready = (st == S_IN) && (!cur_rq || (rq_in_ready && pend == '0));
     assign in_fire  = in_valid && in_ready;
     assign busy     = (st != S_IN) || inrow;
 
-    // requant front end (int32 scores -> int16)
-    logic [L*32-1:0] acc_sh, rq_bias, rq_mult;
-    logic [L*5-1:0]  rq_shift;
+    // requant front end (int32 scores -> int16), RQL lanes
+    logic [L*32-1:0] acc_sh;
     logic [CSW-1:0]  sl;
     assign sl = in_slot[CSW-1:0];
     always_comb begin
-        for (int j = 0; j < L; j++) begin
-            acc_sh[j*32 +: 32]  = in_data[j*32 +: 32] << r_ls[sl];
-            rq_bias[j*32 +: 32] = r_bias[sl];
-            rq_mult[j*32 +: 32] = r_mult[sl];
-            rq_shift[j*5 +: 5]  = r_shift[sl];
+        for (int j = 0; j < L; j++) acc_sh[j*32 +: 32] = in_data[j*32 +: 32] << r_ls[sl];
+    end
+    // sub-beats 1..R-1 of the beat being requantized
+    logic [HL*32-1:0] h_acc;
+    logic [HL-1:0]    h_keep;
+    logic [31:0]      h_bias, h_mult;
+    logic [4:0]       h_shift;
+    logic             h_last;
+    logic             rq_iv, rq_il;
+    logic [RQL*32-1:0] rq_acc, rq_bias, rq_mult;
+    logic [RQL*5-1:0]  rq_shift;
+    logic [RQL-1:0]    rq_ik;
+    always_comb begin
+        if (pend != '0) begin
+            rq_iv  = 1'b1;
+            rq_il  = h_last && (pend == RW'(1));
+            rq_acc = h_acc[RQL*32-1:0];
+            rq_ik  = h_keep[RQL-1:0];
+            for (int j = 0; j < RQL; j++) begin
+                rq_bias[j*32 +: 32] = h_bias;
+                rq_mult[j*32 +: 32] = h_mult;
+                rq_shift[j*5 +: 5]  = h_shift;
+            end
+        end else begin
+            rq_iv  = in_fire && cur_rq;
+            rq_il  = in_last && (R == 1);
+            rq_acc = acc_sh[RQL*32-1:0];
+            rq_ik  = in_keep[RQL-1:0];
+            for (int j = 0; j < RQL; j++) begin
+                rq_bias[j*32 +: 32] = r_bias[sl];
+                rq_mult[j*32 +: 32] = r_mult[sl];
+                rq_shift[j*5 +: 5]  = r_shift[sl];
+            end
         end
     end
-    logic            rq_out_valid, rq_out_last;
-    logic [L*16-1:0] rq_out_data;
-    logic [L-1:0]    rq_out_keep, rq_out_sat;
-    requant #(.L(L)) u_rq (
+    logic              rq_out_valid, rq_out_last;
+    logic [RQL*16-1:0] rq_out_data;
+    logic [RQL-1:0]    rq_out_keep, rq_out_sat;
+    requant #(.L(RQL)) u_rq (
         .clk(clk), .rst_n(rst_n),
-        .in_valid(in_fire && cur_rq), .in_ready(rq_in_ready),
-        .in_acc(acc_sh), .in_bias(rq_bias), .in_mult(rq_mult), .in_shift(rq_shift),
-        .in_keep(in_keep), .in_last(in_last), .in_out16(1'b1),
+        .in_valid(rq_iv), .in_ready(rq_in_ready),
+        .in_acc(rq_acc), .in_bias(rq_bias), .in_mult(rq_mult), .in_shift(rq_shift),
+        .in_keep(rq_ik), .in_last(rq_il), .in_out16(1'b1),
         .out_valid(rq_out_valid), .out_ready(1'b1), .out_data(rq_out_data),
         .out_keep(rq_out_keep), .out_sat(rq_out_sat), .out_last(rq_out_last),
         .sat_clr(sat_clr), .sat_count(sat_count), .sat_sticky(sat_sticky)
     );
-
+    // reassembly: sub-beats leave the requant pipeline on consecutive cycles (out_ready = 1)
+    // and are shifted in from the top, so sub-beat 0 ends in lanes 0..RQL-1
+    logic            rqw_fire;
+    logic [L*16-1:0] rqw_data;
+    logic [L-1:0]    rqw_keep;
+    generate
+        if (R > 1) begin : g_rqmux
+            logic [RW-1:0]        oc;
+            logic [HL*16-1:0]     a_data;
+            logic [HL-1:0]        a_keep;
+            always_ff @(posedge clk) begin
+                if (!rst_n) pend <= '0;
+                else if (pend != '0)             pend <= pend - 1'b1;
+                else if (in_fire && cur_rq)      pend <= RW'(R - 1);
+            end
+            always_ff @(posedge clk) begin
+                if (pend != '0) begin
+                    h_acc  <= h_acc >> (RQL*32);
+                    h_keep <= h_keep >> RQL;
+                end else begin
+                    h_acc   <= acc_sh[L*32-1:RQL*32];
+                    h_keep  <= in_keep[L-1:RQL];
+                    h_bias  <= r_bias[sl];
+                    h_mult  <= r_mult[sl];
+                    h_shift <= r_shift[sl];
+                    h_last  <= in_last;
+                end
+            end
+            always_ff @(posedge clk) begin
+                if (!rst_n) oc <= '0;
+                else if (rq_out_valid) oc <= (oc == RW'(R - 1)) ? '0 : oc + 1'b1;
+            end
+            always_ff @(posedge clk) begin
+                if (rq_out_valid) begin
+                    a_data <= rqw_data[L*16-1:RQL*16];
+                    a_keep <= rqw_keep[L-1:RQL];
+                end
+            end
+            assign rqw_fire = rq_out_valid && (oc == RW'(R - 1));
+            assign rqw_data = {rq_out_data, a_data};
+            assign rqw_keep = {rq_out_keep, a_keep};
+        end else begin : g_rqfull
+            assign pend   = '0;
+            assign h_acc  = '0;
+            assign h_keep = '0;
+            assign h_bias = '0;
+            assign h_mult = '0;
+            assign h_shift = '0;
+            assign h_last = 1'b0;
+            assign rqw_fire = rq_out_valid;
+            assign rqw_data = rq_out_data;
+            assign rqw_keep = rq_out_keep;
+        end
+    endgenerate
     // buffer-write source: the input directly (int16 rows) or the requant output
     logic            wr_fire, wr_last;
     logic [L*16-1:0] wr_data;
@@ -130,8 +222,8 @@ module softmax #(
     assign nk = (m_rq || inrow) ? m_nkeep : in_nkeep;
     always_comb begin
         if (m_rq || (cur_rq && !inrow)) begin
-            wr_fire = rq_out_valid;  wr_last = rq_out_last;
-            wr_data = rq_out_data;   wr_keep = rq_out_keep;
+            wr_fire = rqw_fire;      wr_last = rq_out_last;
+            wr_data = rqw_data;      wr_keep = rqw_keep;
         end else begin
             wr_fire = in_fire;       wr_last = in_last;
             wr_keep = in_keep;

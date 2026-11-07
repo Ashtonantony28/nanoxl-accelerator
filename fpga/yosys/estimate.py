@@ -188,6 +188,10 @@ def run(board: str, params: dict, write: bool = True, tag: str = "", jobs: int =
         c = classify(hier)
         per_block[name] = {"module": module, "count": mult, "runtime_s": round(secs, 1),
                            **{k: v for k, v in c.items() if v}}
+        if module in ("array_seq", "vec_seq", "ctrl_top"):
+            from fpga.yosys.breakdown import breakdown
+            per_block[name]["submodules"] = [{"module": m, "instances": n, **cc}
+                                             for m, n, cc in breakdown(text)[:12]]
         for k, v in hier.items():
             totals[k] = totals.get(k, 0) + v * mult
     tot = classify(totals)

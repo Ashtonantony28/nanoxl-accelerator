@@ -234,7 +234,8 @@ async def random_commands(dut):
 async def back_to_back_throughput(dut):
     """Rows pipeline without draining. Documented cost model (docs/vector-unit.md):
     1 command-accept cycle per command, plus 3 cycles each time an ALU command follows a
-    REQUANT command (ALU depth 3 < requant depth 6, outputs are in order)."""
+    REQUANT command (ALU depth 3 < requant depth 6, outputs are in order), plus 6 + shamt cycles
+    per MUL beat (MUL runs at 1 beat per 7 + shamt cycles)."""
     rng = random.Random(77)
     await start(dut, INPUTS)
     for seq in ([vr.OP_ADD, vr.OP_MUL, vr.OP_MAX, vr.OP_SHL],
@@ -247,7 +248,9 @@ async def back_to_back_throughput(dut):
             cmds.append(c)
         cyc, _, _, nb = await run_cmds(dut, cmds, rng, 1.0, 1.0)
         rq_to_alu = sum(1 for x, y in zip(cmds, cmds[1:]) if x["op"] == vr.VOP_REQUANT and y["op"] < 0x10)
-        bound = nb + len(cmds) + 3 * rq_to_alu + 12      # +12: pipeline fill and bench tail
+        # VEC MUL: 1 beat per 7 + shamt cycles (multi-cycle multiplier, docs/vector-unit.md §3)
+        mul_extra = sum(-(-c["len"] // L) * (6 + c["shamt"]) for c in cmds if c["op"] == vr.OP_MUL)
+        bound = nb + len(cmds) + 3 * rq_to_alu + mul_extra + 12   # +12: pipeline fill and bench tail
         assert cyc <= bound, (cyc, bound, nb)
         dut._log.info(f"L={L}: {nb} beats / {len(cmds)} commands in {cyc} cycles (bound {bound})")
 

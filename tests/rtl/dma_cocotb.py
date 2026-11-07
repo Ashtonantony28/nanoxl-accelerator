@@ -51,6 +51,7 @@ class TB:
         self.dut = dut
         self.rng = random.Random(seed)
         self.bench = Bench(dut)
+        logging.getLogger(f"cocotb.{dut._name}.m_axi").setLevel(logging.ERROR)
         self.ram = AxiRam(AxiBus.from_prefix(dut, "m_axi"), dut.clk, dut.rst_n,
                           reset_active_level=False, size=1 << 32)
         if p_axi:

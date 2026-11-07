@@ -51,7 +51,7 @@ module cmd_proc #(
     output logic            all_idle,       // queues idle and no word waiting at a barrier
     output logic [2:0]      q_idle,
     output logic [2:0]      eng_busy,
-    output logic [2:0]      retire_inc,     // commands completed this cycle (0..4)
+    output logic [2:0]      retire_inc,     // commands completed this cycle (0..7)
     output logic [PW-1:0]   last_index,     // ring index of the last dispatched word
     output logic            q_overflow,
     input  logic [4:0]      sem_dbg_sel,
@@ -71,7 +71,8 @@ module cmd_proc #(
                       .wait_count(d_wcnt), .irq_code(d_irq));
 
     // ---------------- queues + semaphores ----------------
-    logic [2:0]  q_in_valid, q_in_ready, q_retire, q_ovf;
+    logic [2:0]  q_in_valid, q_in_ready, q_ovf;
+    logic [1:0]  q_retire [0:2];
     logic [1:0]  q_kind;
     logic [127:0] q_word;
     logic [2:0]  sig_req, sig_gnt, wait_req, wait_gnt;
@@ -161,6 +162,6 @@ module cmd_proc #(
     end
 
     // retired-command count: queue completions plus executed barriers
-    assign retire_inc = 3'(q_retire[0]) + 3'(q_retire[1]) + 3'(q_retire[2]) + 3'(irq_pulse || end_pulse);
+    assign retire_inc = 3'(q_retire[0]) + 3'(q_retire[1]) + 3'(q_retire[2]) + 3'(irq_pulse || end_pulse);  // <= 7
     assign q_overflow = |q_ovf;
 endmodule

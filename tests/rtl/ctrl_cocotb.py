@@ -111,6 +111,8 @@ class TB:
         self.dut = dut
         self.rng = random.Random(seed)
         self.bench = Bench(dut)
+        for n in ("md_axi", "mf_axi", "s_axil"):
+            logging.getLogger(f"cocotb.{dut._name}.{n}").setLevel(logging.ERROR)
         self.mem = mmap.mmap(-1, 1 << 32)
         self.ram = AxiRam(AxiBus.from_prefix(dut, "md_axi"), dut.clk, dut.rst_n,
                           reset_active_level=False, size=1 << 32, mem=self.mem)
@@ -420,14 +422,24 @@ async def ctrl_latency_mixes(dut):
 
 @cocotb.test()
 async def ctrl_semaphore_saturation(dut):
-    """300 SIGNALs to one semaphore before its WAITs: the 8-bit counter stalls the producer at
-    255 instead of wrapping, and the WAITs then drain it; nothing lost or duplicated."""
+    """260 SIGNALs to one semaphore before its WAITs: the 8-bit counter stalls the producer at
+    255 instead of wrapping (the last 5 wait in the VEC queue), the WAITs then drain it; nothing
+    lost or duplicated. (More than 255 + QDEPTH outstanding SIGNALs on one semaphore ahead of
+    their WAITs would block the in-order dispatcher: a documented stream limit.)"""
     tb = TB(dut, 50, eng_p=1.0, eng_lat=(1, 2), ring_size=64)
     await tb.start()
-    # VEC signals sem 7 300 times; ARRAY consumes in WAITs of 100. ARRAY's WAITs come after all
-    # signals in the stream, so the VEC queue must block at 255 until the first WAIT runs.
-    stream = [isa.C("SIGNAL", queue=2, sem=7) for _ in range(300)]
-    stream += [isa.C("WAIT", queue=1, sem=7, count=100) for _ in range(3)]
+    # VEC signals sem 7 260 times; ARRAY's WAITs come after all signals in the stream, so the VEC
+    # queue must block at 255 until the first WAIT runs.
+    peak = []
+
+    async def watch():
+        while True:
+            await RisingEdge(dut.clk)
+            peak.append(int(dut.u_proc.sem_dbg_val.value))
+    await tb.wr("SEM_SEL", 7)
+    w = cocotb.start_soon(watch())
+    stream = [isa.C("SIGNAL", queue=2, sem=7) for _ in range(260)]
+    stream += [isa.C("WAIT", queue=1, sem=7, count=c) for c in (100, 100, 60)]
     stream += [rand_legal(random.Random(1), "GEMM"), isa.C("END")]
     await tb.submit(stream, chunk_max=63)
     st = await tb.wait_idle(ends=1)
@@ -436,6 +448,8 @@ async def ctrl_semaphore_saturation(dut):
     assert await tb.rd("SEM_VAL") == 0
     assert len(tb.arr.acc) == 1
     assert await tb.rd("PERF_RETIRED") == len(stream)
+    w.cancel()
+    assert max(peak) == 255, max(peak)
 
 
 @cocotb.test()
@@ -523,7 +537,9 @@ async def expect_halt(tb, code, index=None, word=None):
     if index is not None:
         assert await tb.rd("ERR_INDEX") == index
     if word is not None:
-        got = sum((await tb.rd(REG["ERR_W0"] + 4 * i)) << (32 * i) for i in range(4))
+        got = 0
+        for i in range(4):
+            got |= (await tb.rd(REG["ERR_W0"] + 4 * i)) << (32 * i)
         assert got == word, f"{got:032x} != {word:032x}"
     assert (await tb.rd("IRQ_STATUS")) & 4 and int(tb.dut.irq.value) == 1
 
@@ -571,8 +587,10 @@ async def ctrl_illegal_commands(dut):
             if c.op.startswith("DMA"):
                 tb.dma_ref(c)
         m = tb.mark()
+        start = tb.tail
         await tb.submit(pre + [bad] + post, chunk_max=40)
-        await expect_halt(tb, code, index=len(pre), word=int.from_bytes(bad, "little"))
+        await expect_halt(tb, code, index=(start + len(pre)) % tb.ring_size,
+                          word=int.from_bytes(bad, "little"))
         check_stream(tb, pre, m)     # everything before ran, nothing after was dispatched
         tb.check_memory()
         await soft_reset_and_rerun(tb, 90 + k)

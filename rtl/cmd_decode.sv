@@ -8,7 +8,7 @@
 //   ERR_RESV    a reserved bit above the opcode's last field is set
 //   ERR_FIELD   isa.validate() rules: WAIT/SIGNAL queue = 3 (CTRL), WAIT count = 0,
 //               DMA sp_buf > 4, VEC vop undefined / buffer id > 4 / dtype 3,
-//               GEMM int4 with w_trans or with odd N
+//               GEMM int4 with w_trans or with odd N, GEMM_GS odd N, LUT_LOAD table = 3
 // route: 0 DMA, 1 ARRAY, 2 VEC queue, 3 CTRL (END/IRQ barriers).
 // kind:  0 engine command, 1 WAIT, 2 SIGNAL, 3 IRQ, 4 END.
 module cmd_decode (
@@ -36,7 +36,9 @@ module cmd_decode (
     logic [1:0]  dt_in, dt_out;
     logic [2:0]  b0, b1, bd;
     logic        g_int4, g_wtrans;
-    logic [12:0] g_n;
+    logic [12:0] g_n, gs_n;
+    logic        is_gemm_gs, is_lut_load;
+    logic [1:0]  lut_table;
 
     // only the fields used here are connected (additive ISA changes need no edit here)
     /* verilator lint_off PINMISSING */
@@ -49,6 +51,7 @@ module cmd_decode (
         .signal_queue(signal_queue), .signal_sem(signal_sem),
         .dma_load_sp_buf(ld_buf), .dma_store_sp_buf(st_buf),
         .gemm_int4(g_int4), .gemm_w_trans(g_wtrans), .gemm_n(g_n),
+        .is_gemm_gs(is_gemm_gs), .gemm_gs_n(gs_n), .is_lut_load(is_lut_load), .lut_load_table(lut_table),
         .vec_vop(vop), .vec_dt_in(dt_in), .vec_dt_out(dt_out), .vec_src0_buf(b0),
         .vec_src1_buf(b1), .vec_dst_buf(bd)
     );
@@ -65,6 +68,8 @@ module cmd_decode (
         if (is_vec && (vop > 5'd8 || b0 > 3'd4 || b1 > 3'd4 || bd > 3'd4 ||
                        dt_in == 2'd3 || dt_out == 2'd3))             field_bad = 1'b1;
         if (is_gemm && g_int4 && (g_wtrans || g_n[0]))               field_bad = 1'b1;
+        if (is_gemm_gs && gs_n[0])                                   field_bad = 1'b1;
+        if (is_lut_load && lut_table == 2'd3)                        field_bad = 1'b1;
     end
 
     always_comb begin

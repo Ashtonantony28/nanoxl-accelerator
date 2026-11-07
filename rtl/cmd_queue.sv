@@ -38,7 +38,7 @@ module cmd_queue #(
     // status
     output logic          idle,       // nothing queued and nothing outstanding
     output logic          eng_busy,   // at least one command outstanding at the engine
-    output logic          retire,     // a command of this queue completed this cycle
+    output logic [1:0]    retire,     // commands of this queue completed this cycle (0..2)
     output logic          overflow    // sticky: eng_done without an outstanding command
 );
     localparam int OB = $clog2(MAXOUT + 1);
@@ -80,5 +80,5 @@ module cmd_queue #(
 
     assign idle     = !h_valid && (outst == '0);
     assign eng_busy = (outst != '0);
-    assign retire   = (eng_done && outst != '0) || (sig_req && sig_gnt) || (wait_req && wait_gnt);
+    assign retire   = 2'(eng_done && outst != '0) + 2'((sig_req && sig_gnt) || (wait_req && wait_gnt));
 endmodule

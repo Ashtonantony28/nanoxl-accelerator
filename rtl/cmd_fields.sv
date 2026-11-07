@@ -29,6 +29,8 @@ module cmd_fields (
     output logic         is_softmax_online,
     output logic         is_gelu,
     output logic         is_kv_append,
+    output logic         is_gemm_gs,
+    output logic         is_lut_load,
     output logic [15:0]  irq_code,
     output logic [1:0]   wait_queue,
     output logic [4:0]   wait_sem,
@@ -123,7 +125,20 @@ module cmd_fields (
     output logic [8:0]   kv_append_dh,
     output logic [12:0]  kv_append_ctx,
     output logic [12:0]  kv_append_rows,
-    output logic [11:0]  kv_append_src_stride
+    output logic [11:0]  kv_append_src_stride,
+    output logic         gemm_gs_gemv,
+    output logic         gemm_gs_accumulate,
+    output logic [19:0]  gemm_gs_a_addr,
+    output logic [20:0]  gemm_gs_w_addr,
+    output logic [19:0]  gemm_gs_c_addr,
+    output logic [12:0]  gemm_gs_m,
+    output logic [12:0]  gemm_gs_n,
+    output logic [12:0]  gemm_gs_k,
+    output logic [9:0]   gemm_gs_a_stride,
+    output logic [9:0]   gemm_gs_c_stride,
+    output logic [2:0]   gemm_gs_glog2,
+    output logic [1:0]   lut_load_table,
+    output logic [19:0]  lut_load_src_addr
 );
     assign opcode = w[5:0];
     assign is_end = (w[5:0] == 6'h01);
@@ -140,7 +155,9 @@ module cmd_fields (
     assign is_softmax_online = (w[5:0] == 6'h1b);
     assign is_gelu = (w[5:0] == 6'h1c);
     assign is_kv_append = (w[5:0] == 6'h1d);
-    assign known = is_end | is_irq | is_wait | is_signal | is_dma_load | is_dma_store | is_gemm | is_attn_tile | is_vec | is_requant | is_ln | is_softmax_online | is_gelu | is_kv_append;
+    assign is_gemm_gs = (w[5:0] == 6'h12);
+    assign is_lut_load = (w[5:0] == 6'h1e);
+    assign known = is_end | is_irq | is_wait | is_signal | is_dma_load | is_dma_store | is_gemm | is_attn_tile | is_vec | is_requant | is_ln | is_softmax_online | is_gelu | is_kv_append | is_gemm_gs | is_lut_load;
     assign resv_ok = (is_end & (w[127:6] == '0))
                    | (is_irq & (w[127:22] == '0))
                    | (is_wait & (w[127:21] == '0))
@@ -154,7 +171,9 @@ module cmd_fields (
                    | (is_ln & (w[127:115] == '0))
                    | (is_softmax_online & (w[127:126] == '0))
                    | (is_gelu & (w[127:86] == '0))
-                   | (is_kv_append & (w[127:109] == '0));
+                   | (is_kv_append & (w[127:109] == '0))
+                   | (is_gemm_gs & 1'b1)
+                   | (is_lut_load & (w[127:28] == '0));
     assign fixed_q = is_end ? 2'd3
                    : is_irq ? 2'd3
                    : is_wait ? 2'd3
@@ -168,7 +187,9 @@ module cmd_fields (
                    : is_ln ? 2'd2
                    : is_softmax_online ? 2'd2
                    : is_gelu ? 2'd2
-                   : is_kv_append ? 2'd2 : 2'd3;
+                   : is_kv_append ? 2'd2
+                   : is_gemm_gs ? 2'd1
+                   : is_lut_load ? 2'd2 : 2'd3;
     assign irq_code = w[21:6];
     assign wait_queue = w[7:6];
     assign wait_sem = w[12:8];
@@ -264,4 +285,17 @@ module cmd_fields (
     assign kv_append_ctx = {1'b0, w[84:73]} + 13'd1;
     assign kv_append_rows = {1'b0, w[96:85]} + 13'd1;
     assign kv_append_src_stride = w[108:97];
+    assign gemm_gs_gemv = w[6];
+    assign gemm_gs_accumulate = w[7];
+    assign gemm_gs_a_addr = w[27:8];
+    assign gemm_gs_w_addr = w[48:28];
+    assign gemm_gs_c_addr = w[68:49];
+    assign gemm_gs_m = {1'b0, w[80:69]} + 13'd1;
+    assign gemm_gs_n = {1'b0, w[92:81]} + 13'd1;
+    assign gemm_gs_k = {1'b0, w[104:93]} + 13'd1;
+    assign gemm_gs_a_stride = w[114:105];
+    assign gemm_gs_c_stride = w[124:115];
+    assign gemm_gs_glog2 = w[127:125];
+    assign lut_load_table = w[7:6];
+    assign lut_load_src_addr = w[27:8];
 endmodule

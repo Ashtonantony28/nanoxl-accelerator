@@ -12,7 +12,7 @@ CTRL_SRC = ["rtl/fifo_sync.sv", "rtl/cmd_fields.sv", "rtl/cmd_decode.sv", "rtl/c
 
 def test_ctrl_top():
     run("ctrl_top", CTRL_SRC, "ctrl_cocotb", parameters={"MAXB": 16, "LDF": 32},
-        extra_env={"CTRL_NCMD": "300"})
+        extra_env={"CTRL_NCMD": "1500"})
 
 
 @pytest.mark.slow

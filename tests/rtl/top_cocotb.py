@@ -304,6 +304,7 @@ async def top_tiny(dut):
                  s["model"], s["cycles"] / max(1, s["model"]), s["busy_dma"], s["busy_arr"], s["busy_vec"],
                  s["model_busy"])
     if perf_json:
+        Path(perf_json).parent.mkdir(parents=True, exist_ok=True)
         Path(perf_json).write_text(json.dumps({"bundle": bundle, "kv": kv_mode, "N": N, "L": L,
                                                "layers": layers, "steps": res["steps"],
                                                "tokens": res["tokens"], "sat": sat}, indent=1))

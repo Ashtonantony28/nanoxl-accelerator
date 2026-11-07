@@ -152,7 +152,7 @@ stalls (≈ 2-cycle DDR latency), against `cyclemodel.simulate(prog.cmds, hw)` f
 | W8A8, on-chip | 88,976 / 78,492 (+13 %) | 67,241–67,365 / 68,707–68,819 (−2 %) |
 | W4A8, on-chip | 96,202 / 80,319 (**+20 %**) | 72,815–72,939 / 70,021–70,133 (+4 %) |
 | W8A8, DDR KV | 89,137 / 83,388 (+7 %) | 67,493–67,673 / 71,347–71,795 (−5 %) |
-| W4A8, DDR KV | see `TOP_PERF_DIR` output of the slow run | |
+| W4A8, DDR KV | 96,570 / 85,823 (+13 %) | 73,107–73,287 / 72,973–73,421 (0 %) |
 
 Engine busy cycles (W8A8 on-chip prefill, measured / model): DMA 56.0k / 62.0k, ARRAY 56.3k / 50.8k,
 VEC 47.9k / 23.7k. Decode is DMA-bound (all weights, ~800 KB W8A8 / ~410 KB W4A8, stream through one

@@ -8,7 +8,8 @@ SRC = ["rtl/spad_bank.sv", "rtl/buf_spad.sv"]
 
 
 def _pack(pl):
-    return sum(v << (8 * i) for i, v in enumerate(pl))
+    """Sized Verilog literal: a plain integer -G/-P value is truncated to 32 bits by Verilator."""
+    return f"{8 * len(pl)}'h{sum(v << (8 * i) for i, v in enumerate(pl)):x}"
 
 
 @pytest.mark.parametrize("lines,nb,rpl,wpl", [

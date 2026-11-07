@@ -169,7 +169,7 @@ async def softmax_full_rate(dut):
     cyc = await run_rows(dut, rows, 1.0, 1.0, 5)
     budget = sum(3 * nb(len(x)) + 13 for x, _ in rows)
     dut._log.info(f"L={L}: {len(rows)} rows in {cyc} cycles (model {budget})")
-    assert cyc <= budget + 2, (cyc, budget)
+    assert budget - 2 <= cyc <= budget + 2, (cyc, budget)
 
 
 @cocotb.test()

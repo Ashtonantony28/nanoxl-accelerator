@@ -245,17 +245,41 @@ module vec_seq #(
     );
 
     // record buffer (REQUANT): bias, mult, shift per output channel of the current chunk;
-    // up to PL consecutive records written per cycle (record rec_idx + j from line j)
+    // up to PL consecutive records written per cycle (record rec_idx + j from line j).
+    // The PL lines are rotated by rec_idx mod PL into slots (slot q holds the record whose index
+    // is q mod PL), so every entry has one fixed write source (docs/fpga.md C9) instead of a
+    // PL-way mux.
+    localparam int PLB  = (PL > 1) ? $clog2(PL) : 1;
     logic [31:0] rec_bias  [RQ_MAX];
     logic [31:0] rec_mult  [RQ_MAX];
     logic [4:0]  rec_shift [RQ_MAX];
     logic        ls_bad;
+    logic [PL*128-1:0] rec_rot;
+    logic [PL-1:0]     rec_we_rot;
+    logic [13:0]       rec_idx_q [PL];
+    logic [PLB-1:0]    rec_r;
+    assign rec_r = (PL > 1) ? PLB'(rec_idx) : '0;
+    always_comb begin
+        rec_rot    = rec_data;
+        rec_we_rot = rec_we;
+        for (int k = 0; k < PLB; k++) begin
+            if (PL > 1 && rec_r[k]) begin
+                rec_rot    = (PL*128)'({rec_rot, rec_rot} >> ((PL - (1 << k)) * 128));
+                rec_we_rot = PL'({rec_we_rot, rec_we_rot} >> (PL - (1 << k)));
+            end
+        end
+        // slot q holds line (q - rec_idx) mod PL, i.e. record rec_idx + ((q - rec_idx) mod PL)
+        for (int q = 0; q < PL; q++)
+            rec_idx_q[q] = 14'(rec_idx) + 14'((PLB'(q) - rec_r) & PLB'(PL - 1));
+    end
     always_ff @(posedge clk) begin
-        for (int j = 0; j < PL; j++) begin
-            if (rec_we[j] && 32'(rec_idx) + j < RQ_MAX) begin
-                rec_bias[32'(rec_idx) + j]  <= rec_data[j*128 +: 32];
-                rec_mult[32'(rec_idx) + j]  <= rec_data[j*128 + 32 +: 32];
-                rec_shift[32'(rec_idx) + j] <= rec_data[j*128 + 64 +: 5];
+        if (rec_we != '0) begin
+            for (int e = 0; e < RQ_MAX; e++) begin
+                if (rec_we_rot[e % PL] && rec_idx_q[e % PL] == 14'(e)) begin
+                    rec_bias[e]  <= rec_rot[(e % PL)*128 +: 32];
+                    rec_mult[e]  <= rec_rot[(e % PL)*128 + 32 +: 32];
+                    rec_shift[e] <= rec_rot[(e % PL)*128 + 64 +: 5];
+                end
             end
         end
     end

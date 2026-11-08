@@ -25,3 +25,9 @@ Design plan: `docs/design-plan.md`. Contracts: `docs/contracts.md`. Each sub-goa
 | SG11c | M7 | Area/timing: vec_alu MUL multi-cycle (C4), PE DSP packing (C5), requant sharing (C6 vec side), vec_reduce pipelining (C7); final KV260 L=16 estimate and N choice | `pytest tests/rtl -k "pe or array or requant or vec or top"` + Yosys estimates | wave 6 |
 | SG9 | M7 | Vivado project for KV260, timing, PYNQ driver (sim-checked; board run needs hardware) | | wave 4 |
 | SG10 | M8 | INT4 path, batching, perf; AUDIT-2 | | wave 4 |
+
+## Status at pause (2026-11-08)
+Paused at the user's request (weekly usage limit). On `main`: everything through SG11a, all tests green at merge time (tiny W8A8/W4A8 bit-exact end to end in RTL). Unmerged, pushed as WIP branches whose final verification did not complete:
+- `wip/sg11b-buffer-area`: C2 static-priority buf_spad crossbar, C8 OREG/RAM_STYLE, C9 barrel unpack (3 commits + partial estimate refresh). Re-run `SIM=verilator pytest tests/rtl -k "spad or vec_seq or top"` before merging.
+- `wip/sg11c-datapath-area`: C4 multi-cycle VEC MUL, C5 WP486 DSP packing, C6 srdhm, C7 pipelined reduce (merged with main incl. SG11a). ADR-006 (board config choice) not written yet. Re-run `SIM=verilator pytest tests/rtl -k "pe or array or requant or vec or top"` before merging.
+Next: merge both after verification, final per-block Yosys estimate at KV260 L=16 (N=16/32), ADR-006, AUDIT-2.

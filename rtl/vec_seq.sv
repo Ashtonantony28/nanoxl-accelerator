@@ -272,14 +272,14 @@ module vec_seq #(
         for (int q = 0; q < PL; q++)
             rec_idx_q[q] = 14'(rec_idx) + 14'((PLB'(q) - rec_r) & PLB'(PL - 1));
     end
-    always_ff @(posedge clk) begin
-        if (rec_we != '0) begin
-            for (int e = 0; e < RQ_MAX; e++) begin
-                if (rec_we_rot[e % PL] && rec_idx_q[e % PL] == 14'(e)) begin
-                    rec_bias[e]  <= rec_rot[(e % PL)*128 +: 32];
-                    rec_mult[e]  <= rec_rot[(e % PL)*128 + 32 +: 32];
-                    rec_shift[e] <= rec_rot[(e % PL)*128 + 64 +: 5];
-                end
+    // one always_ff per entry (generate loop): portable to Verilator < 5.036, which rejects
+    // delayed array assignments inside procedural for loops (BLKLOOPINIT)
+    for (genvar ge = 0; ge < RQ_MAX; ge++) begin : g_rec
+        always_ff @(posedge clk) begin
+            if (rec_we != '0 && rec_we_rot[ge % PL] && rec_idx_q[ge % PL] == 14'(ge)) begin
+                rec_bias[ge]  <= rec_rot[(ge % PL)*128 +: 32];
+                rec_mult[ge]  <= rec_rot[(ge % PL)*128 + 32 +: 32];
+                rec_shift[ge] <= rec_rot[(ge % PL)*128 + 64 +: 5];
             end
         end
     end

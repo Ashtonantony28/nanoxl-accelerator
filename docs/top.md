@@ -158,12 +158,14 @@ response backpressure):
 
 | test | tier | what |
 |---|---|---|
-| `test_top_spad` (3 configs) | fast, Icarus/Verilator | randomized multi-port traffic on `buf_spad` (beats of 1/2/4 lines at any start, wrap at the end, strobes, valid held until ready) vs a line model with write-visible-to-later-read; no two grants share a bank; starvation bound |
-| `test_top_smoke` | fast (Icarus: prefill only, ~90 s; Verilator: + 1 decode step, ~10 s) | 1-layer cut of tiny W8A8, 2-token prompt, N=8, L=4, VP=4, real driver over AXI; logits, KV cache, per-op saturation counts, SAT CSRs == golden. The compiler's PBUF ring is 10 KiB so different LN blocks reuse PBUF lines |
-| `test_top_smoke_saturation` | fast, Verilator | same with requant/LN shifts lowered so the requant, score, PV, residual (ALU) and LN-out clamps fire (hundreds of events), counts per op == golden |
-| `test_top_tiny[w8a8/w4a8 × onchip/ddr]` | slow, Verilator (~70 s each) | full tiny, N=16, L=16: 16-token reference prompt + 8 greedy decode steps through `NanoXL.step` (ring, doorbell, IRQ wait, logits read, argmax); logits every step, KV cache (on-chip: DMA'd out by a host program; DDR: the image's KV region), per-op saturation counts == golden; tokens == `golden_ref.json` |
-| `test_top_tiny_vp1[w8a8/w4a8]` | slow, Verilator | as `test_top_tiny` on-chip with VP = 1 (16-byte VEC ports): bit-exact, and its cycles equal the SG7c measurement exactly |
-| `test_top_tiny_saturation` | slow, Verilator | full 4-layer W4A8 with lowered shifts, 4-token prompt + 2 steps, 30 % random stalls on all AXI channels |
+| `test_top_spad` (10 configs, 3 with OREG = 1) | fast, Icarus/Verilator | randomized multi-port traffic on `buf_spad` (beats of 1/2/4/8 lines at any start, wrap at the end, strobes, valid held until ready; port sets of the N = 4/8/16/32 tops, 1-16 banks, read latency 1 and 2) vs a line model with write-visible-to-later-read; no two grants share a bank; starvation bound |
+| `test_top_smoke` | fast (Icarus, CI job `fast`: prefill only, ~90 s; Verilator, CI job `verilator-fast`: + 1 decode step, ~10 s) | 1-layer cut of tiny W8A8, 2-token prompt, N=8, L=4, VP=4, real driver over AXI; logits, KV cache, per-op saturation counts, SAT CSRs == golden. The compiler's PBUF ring is 10 KiB so different LN blocks reuse PBUF lines |
+| `test_top_smoke_saturation` | Verilator fast (CI job `verilator-fast`, every push) | same (with the decode step) with requant/LN shifts lowered so the requant, score, PV, residual (ALU) and LN-out clamps fire (hundreds of events), counts per op and the SAT_0..4 CSRs == golden |
+| `test_top_smoke_oreg` | Verilator fast (`verilator-fast`) | same as `test_top_smoke` with OREG = 1 (read latency 2 on every port), RAM_STYLE = 2 and per-buffer bank counts (ACC 16, WBUF 4, the rest 8) |
+| `test_top_smoke_pbuf_ch1` | Verilator fast (`verilator-fast`) | same with every parameter-block load on DMA channel 1, each racing a 4 KiB channel-0 PBUF load (AUDIT-2 A2-03): the ch1 snoop input and the ch0-priority PBUF gate are needed for a bit-exact result |
+| `test_top_tiny[w8a8/w4a8 × onchip/ddr]` | slow, Verilator (CI job `slow`, nightly; ~3 min each) | full tiny, N=16, L=16: 16-token reference prompt + 8 greedy decode steps through `NanoXL.step` (ring, doorbell, IRQ wait, logits read, argmax); logits every step, KV cache (on-chip: DMA'd out by a host program; DDR: the image's KV region), per-op saturation counts == golden; tokens == `golden_ref.json` |
+| `test_top_tiny_vp1[w8a8/w4a8]`, `test_top_tiny_oreg` | slow, Verilator (nightly) | as `test_top_tiny` on-chip with VP = 1 (16-byte VEC ports): bit-exact, and its cycles equal the SG7c measurement exactly |
+| `test_top_tiny_saturation` | slow, Verilator (nightly) | full 4-layer W4A8 with lowered shifts, 4-token prompt + 2 steps, 30 % random stalls on all AXI channels |
 
 **Bench.** `top_cocotb.py` runs the unmodified `nanoxl.driver.NanoXL` in a cocotb `bridge` thread; its
 `RtlBackend` turns `read32` / `write32` into AXI4-Lite transactions (`resume`), `wait_irq` into a wait
@@ -179,28 +181,43 @@ with `Golden.sat_count` (+ the driver's host-embedding `resid` count).
   reuses a line for a different block in tiny, which is why the smoke config shrinks it.
 * SAT_2 / SAT_3 swapped in the `sat_cnt` wiring: `test_top_smoke_saturation` fails (CSR vs per-op totals).
 * `buf_spad` rotation frozen: `test_top_spad` fails (starvation bound).
+* DMA channel 1 dropped from the PBUF snoop, or channel 1 allowed to write PBUF in the same cycle as
+  channel 0 (AUDIT-2 mutants `top_snoop_ch1`, `top_ch1_gate`): `test_top_smoke_pbuf_ch1` fails. The
+  compiler puts every parameter block on channel 0, so no compiled program reaches this logic.
+
+**CI tiers** (`.github/workflows/ci.yml`): `fast` runs the Icarus fast tier on every push (top level:
+`test_top_spad`, `test_top_smoke` prefill); `verilator-fast` runs `make test-verilator-fast` on every
+push (all Verilator fast tests above, the L = 16 VEC engine, exhaustive `pe_pair`, ...); `slow` runs
+`make test-slow SIM=verilator` nightly and on demand (`test_top_tiny*`, `test_vec_seq_l64`, N = 32).
 
 ## 6. Performance: measured vs `nanoxl.cyclemodel`
 
 PERF_CYCLES per step (cycles the device was not idle), N=16, L=16, test buffers, AxiRam with no
 stalls (≈ 2-cycle DDR latency), against `cyclemodel.simulate(prog.cmds, hw, tm)` for the same program,
-`HwConfig` and VEC port width (`vec_port_lines` = VP). As built (VP = 4, 64-byte VEC ports, SG10b):
+`HwConfig` and VEC port width (`vec_port_lines` = VP). As built (VP = 4, 64-byte VEC ports, SG10b; two
+pipelined DMA masters, SG10a; re-measured on the SG11c RTL for AUDIT-2, `test_top_tiny` with `TOP_PERF_DIR`):
 
 | bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
 |---|---|---|
-| W8A8, on-chip | 80,098 / 81,226 (−1 %) | 66,104–66,216 / 70,073–70,185 (−6 %) |
-| W4A8, on-chip | 84,342 / 85,377 (−1 %) | 71,958–72,070 / 73,935–74,047 (−3 %) |
-| W8A8, DDR KV | 80,271 / 86,150 (−7 %) | 66,360–66,528 / 72,189–72,637 (−8 %) |
-| W4A8, DDR KV | 84,749 / 90,909 (−7 %) | 72,254–72,422 / 76,363–76,811 (−6 %) |
+| W8A8, on-chip | 76,394 / 79,088 (−3 %) | 61,923–62,035 / 63,269–63,381 (−2 %) |
+| W4A8, on-chip | 82,598 / 83,287 (−1 %) | 68,730–68,842 / 69,760–69,872 (−1 %) |
+| W8A8, DDR KV | 77,929 / 83,790 (−7 %) | 62,378–62,544 / 64,967–65,135 (−4 %) |
+| W4A8, DDR KV | 83,065 / 88,870 (−7 %) | 69,359–69,526 / 71,917–72,085 (−4 %) |
 
-With 16-byte VEC ports (VP = 1, `test_top_tiny_vp1`; identical to the SG7c measurement):
+The model is pessimistic here because it charges its fixed 300 ns DDR latency, which the AxiRam
+does not have; at 75 cycles of AXI latency it is within 0.1 % on decode (§6.1). SG11a-c did not move
+these counts (identical to the SG10a "after" row of §6.1). Pre-SG10a (one DMA master, as SG10b
+merged): W8A8 on-chip 80,098 / 66,104–66,216, W4A8 84,342 / 71,958–72,070, W8A8 DDR KV 80,271 /
+66,360–66,528, W4A8 DDR KV 84,749 / 72,254–72,422.
+
+With 16-byte VEC ports (VP = 1, `test_top_tiny_vp1`; measured before SG10a, identical to the SG7c measurement):
 
 | bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
 |---|---|---|
 | W8A8, on-chip, VP = 1 | 88,976 / 90,227 (−1 %) | 67,241–67,365 / 70,745–70,857 (−5 %) |
 | W4A8, on-chip, VP = 1 | 96,202 / 96,900 (−1 %) | 72,815–72,939 / 74,843–74,955 (−3 %) |
 
-**VP = 1 → 4:** prefill −10.0 % (W8A8) and −12.3 % (W4A8); decode −1.7 % / −1.2 % (M = 1 VEC work is
+**VP = 1 → 4** (both before SG10a, i.e. against the pre-SG10a counts listed above): prefill −10.0 % (W8A8) and −12.3 % (W4A8); decode −1.7 % / −1.2 % (M = 1 VEC work is
 small next to the weight stream). VEC engine busy in the W8A8 on-chip prefill 47.9k → 26.8k cycles
 (model 48.0k → 26.9k, within 0.3 %); W4A8 47.4k → 26.3k. The other engines do not move: ARRAY 56.3k
 (model 51.3k: GEMM_GS / tile bubbles), DMA 56.0k (model 62.0k: the model's 300 ns DDR latency is not

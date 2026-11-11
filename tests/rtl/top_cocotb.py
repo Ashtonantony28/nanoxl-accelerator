@@ -12,6 +12,8 @@ Environment (set by tests/rtl/test_top.py):
   TOP_STRESS 1 = lowered shifts (every clamp fires)      TOP_PBUF_KB compiler's PBUF ring size
   TOP_PERF_JSON optional path: measured vs modelled cycles are written there
   TOP_AXI_LAT read latency in clock cycles (AR -> first R beat, pipelined) on every read master; 0 = none
+  TOP_PBUF_CHAN default = the compiler's choice (every parameter block on DMA channel 0); ch1 = on
+             channel 1, racing a channel-0 PBUF load (pbuf_channels; AUDIT-2 A2-03)
 """
 from __future__ import annotations
 
@@ -56,6 +58,30 @@ def top_hw(n, l, kv_onchip, pbuf_kb=32):
     on the same PBUF lines (exercises the DMA -> VEC residency snoop)."""
     return KV260.with_(array_n=n, lanes=l, kv_onchip=kv_onchip, abuf=64 * KiB, wbuf=32 * KiB,
                        acc=64 * KiB, pbuf=pbuf_kb * KiB, kvbuf=128 * KiB)
+
+
+SHADOW_PB = 16 * KiB           # PBUF bytes [16, 32) KiB: past a 10 KiB compiler ring, inside the RTL's 32 KiB
+
+
+def pbuf_channels(comp, mode):
+    """AUDIT-2 A2-03. The compiler puts every parameter-block load on DMA channel 0; mode "ch1" makes
+    `comp` (a nanoxl.compiler.Compiler) put them on channel 1 instead, each one preceded by a "shadow"
+    channel-0 load of 4 KiB into PBUF bytes past the compiler's ring (lines nothing reads). The two
+    loads touch different lines, so they are unordered and run at the same time: while channel 0
+    writes PBUF, nanoxl_top must hold channel 1's PBUF writes back (the snoop port takes one line
+    per cycle), and every channel-1 write that overwrites a resident block must reach the snoop's
+    ch1 input. SyncBuilder still adds any sync the moved loads need (check_hazards re-proves it)."""
+    assert mode == "ch1", mode
+    assert comp.hw.pbuf + 4 * KiB <= SHADOW_PB + 4 * KiB <= 32 * KiB
+    src = comp.img.base                # any 4 KiB of the image (never written by a program)
+    orig = comp._dma_dense
+
+    def dense(sp_buf, sp_addr, ddr_addr, nb, chan=0):
+        if sp_buf == isa.PBUF:
+            orig(isa.PBUF, SHADOW_PB, src, 4 * KiB, 0)
+            chan = 1
+        return orig(sp_buf, sp_addr, ddr_addr, nb, chan)
+    comp._dma_dense = dense
 
 
 def prepare(arrays, meta, layers, stress):
@@ -184,6 +210,7 @@ async def top_tiny(dut):
     p_axi = env("TOP_P_AXI", 0.0)
     perf_json = os.environ.get("TOP_PERF_JSON", "")
     axi_lat = env("TOP_AXI_LAT", 0)
+    pbuf_chan = os.environ.get("TOP_PBUF_CHAN", "")
     log = dut._log
     for n in ("md_axi", "md1_axi", "mf_axi", "s_axil"):
         logging.getLogger(f"cocotb.{dut._name}.{n}").setLevel(logging.WARNING)
@@ -233,6 +260,9 @@ async def top_tiny(dut):
         """Blocking host program: exactly what nanoxl.driver does for generate(), step by step,
         plus golden comparisons."""
         dev = NanoXL(be, A, meta, hw, name=bundle, use_irq=True, timeout=1e9)
+        if pbuf_chan:
+            pbuf_channels(dev.comp, pbuf_chan)
+        pb_ch = [0, 0]                         # PBUF loads per DMA channel, as compiled
         g = Golden(A, meta)
         cache = g.new_cache()
         dev.clear_counters()
@@ -242,6 +272,9 @@ async def top_tiny(dut):
             feed = toks if s == 0 else [res["tokens"][-1]]
             seqs = [(dev.pos[0], len(feed))]
             prog = dev.comp.compile_step(seqs)
+            for c in prog.cmds:
+                if c.op == "DMA_LOAD" and c["sp_buf"] == isa.PBUF:
+                    pb_ch[c["chan"] & 1] += 1
             res["vec_cmds"] += [c for c in prog.cmds if c.queue == isa.Q_VEC and c.op not in ("WAIT", "SIGNAL")]
             logits = dev.step([feed])[0]
             ref = g.forward(feed, cache)
@@ -285,12 +318,16 @@ async def top_tiny(dut):
         res["err"] = be.read32(R.ERR_CODE)
         res["status"] = be.read32(R.STATUS)
         res["n_csr"] = be.n_csr
+        res["pb_ch"] = pb_ch
         return res
 
     res = await bridge(host)()
     await ClockCycles(dut.clk, 4)
     assert res["err"] == 0, f"ERR_CODE {res['err']}"
     assert res["status"] & R.ST_QUEUES_IDLE
+    log.info("PBUF loads per DMA channel: %s", res["pb_ch"])
+    if pbuf_chan:
+        assert res["pb_ch"][1] > 0 and res["pb_ch"][0] == res["pb_ch"][1], res["pb_ch"]
 
     # per-op saturation counters: RTL VEC-engine deltas per command (+ host embedding) == golden
     sat = per_op_sat(res["vec_cmds"], mon.snaps)

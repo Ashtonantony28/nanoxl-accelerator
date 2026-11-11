@@ -1,5 +1,23 @@
 name: ci
-on: [push, pull_request]
+# Tiers (docs/design-plan.md §7, AUDIT-2 A2-01/A2-02):
+#   fast            every push / PR: Python tests + cocotb fast tier on Icarus + formal + audit repros
+#   verilator-fast  every push / PR: the Verilator-only fast benches (`make test-verilator-fast`:
+#                   L >= 16 VEC engine, top-level SAT/OREG/ch1-PBUF smoke tests with a decode step,
+#                   exhaustive pe_pair, N = 16 array, L = 32/64 reduce, ...)
+#   slow            nightly + manual: the whole slow tier on Verilator (`make test-slow SIM=verilator`:
+#                   test_top_tiny* bit-exact full model, vec_seq L = 64, array N = 32, long ctrl runs)
+# Verilator v5.040 is built from source once and cached (key = version + runner image).
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  VERILATOR_VERSION: v5.040
+  VERILATOR_PREFIX: /home/runner/verilator
+
 jobs:
   fast:
     runs-on: ubuntu-24.04
@@ -11,8 +29,79 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y iverilog yosys z3
-      - run: pip install numpy pytest cocotb cocotbext-axi z3-solver
+      - run: pip install numpy pytest pyyaml cocotb cocotbext-axi z3-solver
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: which yosys-smtbmc && z3 --version
       - run: make test-fast SIM=icarus
       - run: make test-audit
+
+  verilator-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Cache Verilator
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VERILATOR_PREFIX }}
+          key: verilator-${{ env.VERILATOR_VERSION }}-ubuntu-24.04
+      - name: Build Verilator from source
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git help2man perl make autoconf g++ flex bison libfl2 libfl-dev zlib1g-dev
+          git clone --depth 1 --branch "$VERILATOR_VERSION" https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator
+          autoconf
+          ./configure --prefix="$VERILATOR_PREFIX"
+          make -j"$(nproc)"
+          make install
+      - run: '"$VERILATOR_PREFIX/bin/verilator" --version'
+
+  verilator-fast:
+    needs: verilator-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Restore Verilator
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VERILATOR_PREFIX }}
+          key: verilator-${{ env.VERILATOR_VERSION }}-ubuntu-24.04
+          fail-on-cache-miss: true
+      - name: Put Verilator at /opt/verilator (tests/rtl/simrun.py) and on PATH
+        run: |
+          sudo apt-get update && sudo apt-get install -y g++ make libfl2 zlib1g-dev
+          sudo ln -sfn "$VERILATOR_PREFIX" /opt/verilator
+          echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+      - run: verilator --version
+      - run: pip install numpy pytest cocotb cocotbext-axi
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: make test-verilator-fast
+
+  slow:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: verilator-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Restore Verilator
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VERILATOR_PREFIX }}
+          key: verilator-${{ env.VERILATOR_VERSION }}-ubuntu-24.04
+          fail-on-cache-miss: true
+      - name: Put Verilator at /opt/verilator (tests/rtl/simrun.py) and on PATH
+        run: |
+          sudo apt-get update && sudo apt-get install -y g++ make libfl2 zlib1g-dev
+          sudo ln -sfn "$VERILATOR_PREFIX" /opt/verilator
+          echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+      - run: verilator --version
+      - run: pip install numpy pytest cocotb cocotbext-axi
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: make test-slow SIM=verilator

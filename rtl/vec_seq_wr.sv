@@ -184,4 +184,36 @@ module vec_seq_wr #(
     end
 
     assign busy = w_act || hv || (cs != '0) || f_out_valid;
+
+`ifndef SYNTHESIS
+    // Simulation-only check (AUDIT-2 A2-05). A wide beat emits chunks 0..hn only (hn = the last
+    // chunk with a kept lane), and the walker steps once per emitted chunk. The two stay in step
+    // only if a chunk that ends a row is exactly the last emitted chunk of a beat with i_last, i.e.
+    // every non-final beat of a row has a kept lane in its last chunk (true when keep is "the first
+    // len lanes" and only the row's final beat is ragged, as every producer does today). A non-final
+    // beat whose trailing chunk(s) are fully masked would make every later chunk of the row set
+    // land one beat early. Interior masking that leaves the last chunk with a kept lane is fine
+    // (the strobes carry it). The same check catches a final beat whose keep disagrees with the
+    // row length. chk_err is sticky; the check is $fatal unless a bench sets
+    // chk_nofatal (tests/rtl/vec_seq_wr_cocotb.py does, to observe chk_err).
+    logic h_last;                                 // i_last of the beat in the holding register
+    logic chk_err, chk_fail;
+    logic chk_nofatal = 1'b0;
+    assign chk_fail = rst_i && wide && w_step && (w_rll != (h_last && hm == hn));
+    always_ff @(posedge clk) begin
+        if (!rst_n) chk_err <= 1'b0;
+        else if (chk_fail) chk_err <= 1'b1;
+        if (wide && i_valid && i_ready) h_last <= i_last;
+    end
+    always @(posedge clk) begin
+        if (rst_n && chk_fail) begin
+            if (chk_nofatal)
+                $display("vec_seq_wr: A2-05 check failed at %0t (chunk %0d of %0d, i_last %0d, row end %0d)",
+                         $time, hm, hn, h_last, w_rll);
+            else
+                $fatal(1, "vec_seq_wr: A2-05 check failed: the emitted chunks of a wide beat disagree with the walker's row end (chunk %0d of %0d, i_last %0d, row end %0d)",
+                       hm, hn, h_last, w_rll);
+        end
+    end
+`endif
 endmodule

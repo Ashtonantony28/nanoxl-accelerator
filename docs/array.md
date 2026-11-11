@@ -198,7 +198,7 @@ Resources (Yosys 0.33 `synth_xilinx`, `systolic_array` alone):
 On the 7 series the DSP48E1 multiplier is 25×18, too narrow for the 27-bit packed operand,
 so packing saves nothing there and costs the psum adders the DSP48E1 otherwise absorbs:
 **build the PYNQ-Z2 with PACK = 0** (the parameter is not yet plumbed through
-`array_ctrl` / `array_seq` / `nanoxl_top`; see ADR-006).
+`array_ctrl` / `array_seq` / `nanoxl_top`; see ADR-006 (board configuration)).
 
 ## 7. ARRAY engine sequencer (`array_seq.sv`, SG7a / M5)
 

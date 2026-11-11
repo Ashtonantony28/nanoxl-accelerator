@@ -30,25 +30,36 @@ def _top(n, l, tag, vp=4, rtl=None, **env):
 
 
 def test_top_smoke():
-    """Fast tier: prefill of a 2-token prompt (+ one decode step on Verilator; Icarus runs the prefill
-    only, about 90 s) on a 1-layer cut of tiny W8A8 (N=8, L=4, 64-byte VEC ports); logits, KV cache and per-op saturation
-    counters bit-exact vs golden. The compiler gets a 10 KiB PBUF ring, so different parameter blocks
+    """Fast tier: prefill of a 2-token prompt (+ one decode step on Verilator, i.e. in the CI job
+    verilator-fast; Icarus runs the prefill only, about 90 s) on a 1-layer cut of tiny W8A8 (N=8,
+    L=4, 64-byte VEC ports); logits, KV cache and per-op saturation counters bit-exact vs golden. The compiler gets a 10 KiB PBUF ring, so different parameter blocks
     reuse PBUF lines (the residency snoop must invalidate)."""
     _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=int(SIM == "verilator"),
          TOP_PBUF_KB=10)
 
 
 @VERILATOR_ONLY
+def test_top_smoke_pbuf_ch1():
+    """Verilator fast tier (CI job verilator-fast; skipped on Icarus). AUDIT-2 A2-03: as test_top_smoke
+    (prefill + one decode step) with every parameter-block load on DMA channel 1, each racing a 4 KiB
+    channel-0 PBUF load (top_cocotb.pbuf_channels). The 10 KiB PBUF ring makes ch1 loads overwrite
+    resident blocks, so the snoop's ch1 input and the ch0-priority PBUF gate in nanoxl_top are both
+    needed for a bit-exact result (mutants top_snoop_ch1 / top_ch1_gate fail it)."""
+    _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1,
+         TOP_PBUF_KB=10, TOP_PBUF_CHAN="ch1")
+
+
+@VERILATOR_ONLY
 def test_top_smoke_saturation():
-    """Fast tier: as test_top_smoke with lowered requant / LN shifts, so the requant, score, ALU (residual)
-    and LN clamps all fire; per-op counts and the SAT_0..4 CSRs must equal golden's."""
+    """Verilator fast tier (CI job verilator-fast; skipped on Icarus): as test_top_smoke with lowered
+    requant / LN shifts, so the requant, score, ALU (residual) and LN clamps all fire; per-op counts and the SAT_0..4 CSRs must equal golden's."""
     _top(8, 4, "_smoke", TOP_BUNDLE="w8a8", TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1, TOP_STRESS=1, TOP_PBUF_KB=10)
 
 
 @VERILATOR_ONLY
 def test_top_smoke_oreg():
-    """Fast tier: as test_top_smoke with the scratchpad bank output register (OREG = 1, read latency 2 on
-    every port, null buffer included) and per-buffer bank counts (ACC 16 banks, WBUF 4, the rest 8):
+    """Verilator fast tier (CI job verilator-fast; skipped on Icarus): as test_top_smoke with the
+    scratchpad bank output register (OREG = 1, read latency 2 on every port, null buffer included) and per-buffer bank counts (ACC 16 banks, WBUF 4, the rest 8):
     every requester's credit counter and the ACC read-modify-write must tolerate it, bit-exact."""
     _top(8, 4, "_smoke", rtl={"OREG": 1, "ACC_NB": 16, "WBUF_NB": 4, "RAM_STYLE": 2}, TOP_BUNDLE="w8a8",
          TOP_LAYERS=1, TOP_PROMPT=2, TOP_DECODE=1, TOP_PBUF_KB=10)

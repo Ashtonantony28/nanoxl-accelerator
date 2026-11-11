@@ -54,7 +54,7 @@ A beat accepted at edge `k` appears on `out_*` after edge `k+5`, i.e. 6 cycles l
 
 **S4 identity (SG11c).** For a product `p < 0`, `p + nudge = p + 1 − 2^30` is negative, and C truncation of a negative `x` by `2^31` equals `floor((x + 2^31 − 1) / 2^31) = floor((p + 2^30) / 2^31)`; for `p ≥ 0` it is `floor((p + 2^30) / 2^31)` directly. So `trunc(p + nudge, 2^31) = (p + 2^30) >>> 31 = ((p >>> 30) + 1) >>> 1` for every `p`, and S4 is one 34-bit increment instead of two 64-bit adds and a sign-dependent bias (Yosys: `srdhm` 209 → 118 LUT on the KV260). The clamp in S6 tests the bits above the format's sign bit for equality instead of two 32-bit compares.
 
-**DSP decomposition option (`requant #(.NDSP(3))`, default 4).** The 32×32 product needs four 27×18 tiles: each tile is at most 27 bits on one side, so a tile can hold at most one corner of the 32×32 square. `NDSP = 3` covers three corners with DSPs (`a = aH·2^26 + aL`, `b = bH·2^17 + bL`: `aL·bL`, `aL·bH`, `aH·bL`) and builds the 6×15 corner `aH·bH` from shifted partial products in fabric. Under Yosys it costs ~175 LUT per DSP saved on the KV260 (requant L = 16: 5.8 k LUT / 64 DSP → 8.6 k / 48) and on the 7 series it saves nothing (the 26-bit operand does not fit DSP48E1's 25 bits). It is tested (`test_requant[*-3]`, `test_srdhm[3]`) but not used: on both boards LUTs, not DSPs, are the limit (ADR-006).
+**DSP decomposition option (`requant #(.NDSP(3))`, default 4).** The 32×32 product needs four 27×18 tiles: each tile is at most 27 bits on one side, so a tile can hold at most one corner of the 32×32 square. `NDSP = 3` covers three corners with DSPs (`a = aH·2^26 + aL`, `b = bH·2^17 + bL`: `aL·bL`, `aL·bH`, `aH·bL`) and builds the 6×15 corner `aH·bH` from shifted partial products in fabric. Under Yosys it costs ~175 LUT per DSP saved on the KV260 (requant L = 16: 5.8 k LUT / 64 DSP → 8.6 k / 48) and on the 7 series it saves nothing (the 26-bit operand does not fit DSP48E1's 25 bits). It is tested (`test_requant[*-3]`, `test_srdhm[3]`) but not used: on both boards LUTs, not DSPs, are the limit (ADR-006, board configuration).
 
 **Saturation counting.** `out_sat[i] = saturated(i) & out_keep[i]`. The `sat_counter` adds `popcount(out_sat)` on every output transfer. It is 32 bits wide, saturates instead of wrapping, and has a sticky flag; `sat_clr` clears both. A clear in the same cycle as events keeps those events.
 
@@ -332,7 +332,7 @@ is then 77 % GEMM, 8 % softmax, 7 % attention GEMMs, 4 % LN (`nanoxl.cyclemodel`
 NB ≥ PL (checked at elaboration); `nanoxl_top` builds NB = 2 × its widest port, i.e. 8 banks at N ≤ 16
 with VP = 4 and 16 at N = 32 (ACC rows of 8 lines). See docs/top.md §3 for concurrent streams.
 
-**Measured per-command occupancy** (AUDIT-1 A1-01, re-measured for SG10b; `python3 bench/vec_seq_perf.py`,
+**Measured per-command occupancy** (AUDIT-1 A1-01, re-measured for SG10b; the L = 64 columns re-measured on Verilator after SG11b/SG11c for AUDIT-2 A2-07 and unchanged to the cycle; `python3 bench/vec_seq_perf.py`,
 module `bench/vec_seq_perf_cocotb.py`, raw data and command fields in `bench/results/vec_seq_perf.json`
 as `{"pl1"|"pl4": {L: ...}}`). Ports always ready, read latency 2, each shape run as two identical
 back-to-back commands; occupancy = done to done (the engine runs one command at a time, so this

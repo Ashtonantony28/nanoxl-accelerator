@@ -300,7 +300,7 @@ module vec_unit #(
     assign sat_sticky = alu_sticky | rq_sticky;
     // busy: a command is issuing, an elementwise row is still draining, or a reduce
     // result is pending (in the pipeline or on r_*).
-    logic [2:0] red_inflight;           // <= 4 rows can be in the 3-stage pipe + result reg
+    logic [2:0] red_inflight;           // <= 5 rows: S1 + up to 3 tree stages (L = 64) + result reg
     logic       red_inc, red_dec;
     assign red_inc = in_fire && c_unit == U_RED && last;
     assign red_dec = r_valid && r_ready;

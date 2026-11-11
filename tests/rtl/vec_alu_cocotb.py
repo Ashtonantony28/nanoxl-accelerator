@@ -15,6 +15,18 @@ I32 = (vr.INT32_MIN, vr.INT32_MAX + 1)
 EXT = [vr.INT32_MIN, vr.INT32_MIN + 1, -32769, -32768, -129, -128, -1, 0, 1, 127, 128,
        32767, 32768, vr.INT32_MAX - 1, vr.INT32_MAX]
 
+
+
+def mul_cyc(sh):
+    """cycles per VEC MUL beat (multi-cycle multiplier, docs/vector-unit.md §3)"""
+    return 7 + sh
+
+
+def mul_depth(sh):
+    """accept -> out_valid of a lone MUL beat, counted like pipeline_depth"""
+    return 9 + sh
+
+
 INPUTS = ["in_valid", "in_a", "in_b", "in_op", "in_fmt", "in_shamt", "in_lo", "in_hi",
           "in_keep", "in_last", "out_ready", "sat_clr"]
 
@@ -138,7 +150,9 @@ async def random_ops_backpressure(dut):
         part = beats[k * third:(k + 1) * third] if k < 2 else beats[2 * third:]
         ns, cyc = await run_and_check(dut, part, rng, pi, po)
         if k == 0:
-            assert cyc <= len(part) + 5, cyc   # full throughput
+            # full throughput, except MUL: 1 beat per MUL_CYC cycles (multi-cycle multiplier)
+            extra = sum(mul_cyc(b["sh"]) - 1 for b in part if b["op"] == vr.OP_MUL)
+            assert len(part) + extra <= cyc <= len(part) + extra + 5, (cyc, len(part), extra)
         total += ns
     assert u(dut.sat_count) == total and int(dut.sat_sticky.value) == int(total > 0)
     dut.sat_clr.value = 1
@@ -166,3 +180,47 @@ async def pipeline_depth(dut):
         await FallingEdge(dut.clk)
     assert c == 3, f"pipeline depth {c}, documented 3"
     assert unpack(u(dut.out_data), L, 32) == [3] * L
+
+
+@cocotb.test()
+async def mul_depth_and_rate(dut):
+    """A lone MUL beat (shamt 31) appears mul_depth(31) cycles after acceptance; back-to-back
+    MUL beats (shamt 0) are accepted every mul_cyc(0) cycles, and so is a non-MUL beat right
+    after a MUL."""
+    rng = random.Random(8)
+    await start(dut, INPUTS)
+    dut.out_ready.value = 1
+    a = [rng.randrange(*I32) for _ in range(L)]
+    b = [rng.randrange(*I32) for _ in range(L)]
+    dut.in_a.value = pack(a, 32); dut.in_b.value = pack(b, 32)
+    dut.in_op.value = vr.OP_MUL; dut.in_fmt.value = 2; dut.in_shamt.value = 31
+    dut.in_keep.value = (1 << L) - 1; dut.in_valid.value = 1
+    await ReadOnly()
+    assert dut.in_ready.value == 1
+    await FallingEdge(dut.clk)
+    dut.in_valid.value = 0
+    for c in range(1, 60):
+        await ReadOnly()
+        if dut.out_valid.value == 1:
+            break
+        await FallingEdge(dut.clk)
+    assert c == mul_depth(31), f"MUL depth {c}, documented {mul_depth(31)}"
+    er, _ = vr.alu(vr.OP_MUL, a, b, 2, 31, 0, 0)
+    assert unpack(u(dut.out_data), L, 32) == [int(x) for x in er]
+    await FallingEdge(dut.clk)
+    # stream: MUL, MUL, ADD with valid held high; record acceptance cycles
+    seq = [vr.OP_MUL, vr.OP_MUL, vr.OP_ADD]
+    dut.in_shamt.value = 0
+    acc, k = [], 0
+    for cyc in range(40):
+        if k < len(seq):
+            dut.in_valid.value = 1
+            dut.in_op.value = seq[k]
+        else:
+            dut.in_valid.value = 0
+        await ReadOnly()
+        if k < len(seq) and dut.in_ready.value == 1:
+            acc.append(cyc)
+            k += 1
+        await FallingEdge(dut.clk)
+    assert [x - acc[0] for x in acc] == [0, mul_cyc(0), 2 * mul_cyc(0)], acc

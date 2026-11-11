@@ -16,7 +16,8 @@
 // out_sat[i] = lane i saturated AND out_keep[i]. sat_count counts saturating kept lanes
 // on output transfers (sticky, saturating counter; sat_clr clears).
 module requant #(
-    parameter int L = 4
+    parameter int L    = 4,
+    parameter int NDSP = 4     // srdhm DSP tiles per lane: 4, or 3 (fabric corner, rtl/srdhm.sv)
 ) (
     input  logic            clk,
     input  logic            rst_n,
@@ -82,7 +83,6 @@ module requant #(
             logic        [4:0]  sh1, sh2, sh3, sh4;
             logic signed [15:0] o6;
             logic               s6;
-            logic signed [31:0] lo, hi;
 
             always_ff @(posedge clk) begin
                 if (adv) begin
@@ -99,16 +99,22 @@ module requant #(
             end
 
             // S2..S4
-            srdhm u_srdhm (.clk(clk), .en(adv), .a(x1), .b(m1), .y(q4));
+            srdhm #(.NDSP(NDSP)) u_srdhm (.clk(clk), .en(adv), .a(x1), .b(m1), .y(q4));
 
-            // S6: clamp to int8 / int16 (mode bit of the beat now in S5).
-            assign lo = o16_p[D-2] ? -32'sd32768 : -32'sd128;
-            assign hi = o16_p[D-2] ?  32'sd32767 :  32'sd127;
+            // S6: clamp to int8 / int16 (mode bit of the beat now in S5). y5 fits iff its bits
+            // above the format's sign bit equal the sign bit; else it saturates toward its sign.
+            logic fits;
+            assign fits = o16_p[D-2] ? (y5[31:15] == {17{y5[31]}}) : (y5[31:7] == {25{y5[31]}});
             always_ff @(posedge clk) begin
                 if (adv) begin
-                    if (y5 > hi)      begin o6 <= hi[15:0]; s6 <= 1'b1; end
-                    else if (y5 < lo) begin o6 <= lo[15:0]; s6 <= 1'b1; end
-                    else              begin o6 <= y5[15:0]; s6 <= 1'b0; end
+                    if (fits) begin
+                        o6 <= y5[15:0];
+                        s6 <= 1'b0;
+                    end else begin
+                        o6 <= o16_p[D-2] ? (y5[31] ? 16'sh8000 : 16'sh7FFF)
+                                         : (y5[31] ? -16'sd128 : 16'sd127);
+                        s6 <= 1'b1;
+                    end
                 end
             end
             assign out_data[i*16 +: 16] = o6;

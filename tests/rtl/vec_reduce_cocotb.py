@@ -114,3 +114,31 @@ async def random_rows_backpressure(dut):
     nb += await run_rows(dut, [[rng.randrange(-99, 99) for _ in range(rng.randrange(1, L + 1))]
                                for _ in range(200)], rng, False, 1.0, 1.0)
     dut._log.info(f"L={L}: {len(rows) + 200} random rows, {nb} beats")
+
+
+def documented_latency(lanes):
+    """Result valid 2 + NTS cycles after the last beat; NTS = tree register stages of 2 levels."""
+    lv = (max(lanes, 1) - 1).bit_length()
+    return 2 + max(1, -(-lv // 2))
+
+
+@cocotb.test()
+async def result_latency(dut):
+    """A one-beat row accepted at edge k gives out_valid after edge k + latency - 1
+    (latency counted as in the vec_alu / requant depth tests)."""
+    from cocotb.triggers import FallingEdge, ReadOnly
+    await start(dut, INPUTS)
+    dut.out_ready.value = 1
+    dut.in_data.value = pack(list(range(1, L + 1)), 32)
+    dut.in_keep.value = (1 << L) - 1
+    dut.in_last.value = 1
+    dut.in_valid.value = 1
+    await FallingEdge(dut.clk)
+    dut.in_valid.value = 0
+    for c in range(1, 12):
+        await ReadOnly()
+        if dut.out_valid.value == 1:
+            break
+        await FallingEdge(dut.clk)
+    assert c == documented_latency(L), f"latency {c}, documented {documented_latency(L)}"
+    assert u(dut.out_sum) == L * (L + 1) // 2

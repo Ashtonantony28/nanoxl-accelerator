@@ -157,7 +157,8 @@ BOARD_TIMING = {"kv260": MEASURED, "pynq-z2": MEASURED.with_(axi_port_bytes=8)}
 
 
 def timing_for(hw: HwConfig) -> RtlTiming:
-    return BOARD_TIMING.get(hw.name, MEASURED)
+    name = hw.name[:-len("-fpga")] if hw.name.endswith("-fpga") else hw.name
+    return BOARD_TIMING.get(name, MEASURED)
 
 
 def ddr_latency(hw: HwConfig) -> int:

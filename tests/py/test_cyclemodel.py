@@ -352,3 +352,9 @@ def test_cyclemodel_matches_measured_top_level(bundle, kv_onchip, vp):
     for pos in (16, 23):
         dec = simulate(comp.compile_step([(pos, 1)]).cmds, hw, tm=tm).cycles
         assert 0.9 * dec_lo < dec < 1.1 * dec_hi, (pos, dec, dec_lo, dec_hi)
+
+
+def test_timing_for_fpga_boards_inherit_planning_board_timing():
+    from nanoxl import cyclemodel, hwconfig
+    for name in ("kv260", "pynq-z2"):
+        assert cyclemodel.timing_for(hwconfig.BOARDS[name + "-fpga"]) == cyclemodel.timing_for(hwconfig.BOARDS[name])

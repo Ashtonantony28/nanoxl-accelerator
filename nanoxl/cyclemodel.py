@@ -86,7 +86,8 @@ def _cd(a, b):
 
 # VEC engine fixed costs fitted to bench/results/vec_seq_perf.json (rtl/vec_seq.sv measured at
 # L = 4, 16 on Icarus and 64 on Verilator, with PL = 1 and 4 lines per port beat, ports always ready,
-# read latency 2; docs/vector-unit.md §9.3), as VEC_CAL[port lines][lanes]. Variable parts are not
+# read latency 2; docs/vector-unit.md §9.3), as VEC_CAL[port lines][lanes]. The L = 64 rows were
+# re-measured after SG11b/SG11c (AUDIT-2 A2-07): every shape identical to the cycle, no refit. Variable parts are not
 # fitted: they are the port and lane widths. Keys:
 #   vec / gelu / kv   per-command fixed cycles (decode, row setup, pipeline drain)
 #   rq_chunk, rq_row  REQUANT fixed cycles per column chunk (<= RQ_MAX) and per row of a chunk

@@ -332,7 +332,7 @@ is then 77 % GEMM, 8 % softmax, 7 % attention GEMMs, 4 % LN (`nanoxl.cyclemodel`
 NB ≥ PL (checked at elaboration); `nanoxl_top` builds NB = 2 × its widest port, i.e. 8 banks at N ≤ 16
 with VP = 4 and 16 at N = 32 (ACC rows of 8 lines). See docs/top.md §3 for concurrent streams.
 
-**Measured per-command occupancy** (AUDIT-1 A1-01, re-measured for SG10b; `python3 bench/vec_seq_perf.py`,
+**Measured per-command occupancy** (AUDIT-1 A1-01, re-measured for SG10b; the L = 64 columns re-measured on Verilator after SG11b/SG11c for AUDIT-2 A2-07 and unchanged to the cycle; `python3 bench/vec_seq_perf.py`,
 module `bench/vec_seq_perf_cocotb.py`, raw data and command fields in `bench/results/vec_seq_perf.json`
 as `{"pl1"|"pl4": {L: ...}}`). Ports always ready, read latency 2, each shape run as two identical
 back-to-back commands; occupancy = done to done (the engine runs one command at a time, so this

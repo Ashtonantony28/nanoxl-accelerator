@@ -2,19 +2,20 @@
  "board": "pynq-z2",
  "device": "XC7Z020",
  "yosys": "Yosys 0.33 (git sha1 2584903a060)",
+ "lut_note": "utilization LUT = LUT (logic) + LUTRAM_LUT6 (distributed RAM / SRL in LUT6 sites); INV excluded",
  "command": "synth_xilinx -family xc7, per block (hierarchical), summed",
  "params": {
-  "N": 16,
-  "L": 16,
+  "N": 8,
+  "L": 4,
   "M_DEPTH": 64,
   "ABUF_LINES": 8192,
   "WBUF_LINES": 4096,
   "ACC_LINES": 4096,
   "PBUF_LINES": 2048,
   "KV_LINES": 8192,
-  "NB": 0,
+  "NB": 2,
   "RAM_STYLE": 1,
-  "VP": 4,
+  "VP": 1,
   "CTX_MAX": 256,
   "D_MAX": 384,
   "NG": 6,
@@ -23,47 +24,48 @@
   "MAXB": 256,
   "LDF": 512
  },
- "runtime_s": 950.8,
- "cpu_s": 1091.8,
- "jobs": 2,
+ "runtime_s": 420.0,
+ "cpu_s": 420.0,
+ "jobs": 1,
  "totals": {
-  "LUT": 396051,
-  "LUTRAM": 1985,
-  "FF": 605463,
-  "CARRY": 9180,
-  "MUXF": 36687,
-  "DSP": 672,
-  "BRAM36": 128,
+  "LUT": 59404,
+  "LUTRAM": 1616,
+  "FF": 41586,
+  "CARRY": 4335,
+  "MUXF": 3961,
+  "DSP": 172,
+  "BRAM36": 119,
   "BRAM18": 0,
   "URAM": 0,
   "other": {
-   "BUFG": 52,
-   "INV": 22427
-  }
+   "BUFG": 22,
+   "INV": 10124
+  },
+  "LUTRAM_LUT6": 5801
  },
  "utilization": {
   "LUT": {
-   "used": 396051,
+   "used": 65205,
    "avail": 53200,
-   "pct": 744.5,
+   "pct": 122.6,
    "over": true
   },
   "FF": {
-   "used": 605463,
+   "used": 41586,
    "avail": 106400,
-   "pct": 569.0,
-   "over": true
+   "pct": 39.1,
+   "over": false
   },
   "DSP": {
-   "used": 672,
+   "used": 172,
    "avail": 220,
-   "pct": 305.5,
-   "over": true
+   "pct": 78.2,
+   "over": false
   },
   "BRAM36": {
-   "used": 128.0,
+   "used": 119.0,
    "avail": 140,
-   "pct": 91.4,
+   "pct": 85.0,
    "over": false
   },
   "URAM": {
@@ -77,8 +79,8 @@
   "ctrl_top": {
    "module": "ctrl_top",
    "count": 1,
-   "runtime_s": 36.1,
-   "LUT": 7992,
+   "runtime_s": 36.8,
+   "LUT": 7966,
    "LUTRAM": 227,
    "FF": 2638,
    "CARRY": 966,
@@ -86,16 +88,17 @@
    "BRAM36": 4,
    "other": {
     "BUFG": 1,
-    "INV": 769
+    "INV": 771
    },
+   "LUTRAM_LUT6": 908,
    "submodules": [
     {
      "module": "sem_unit",
      "instances": 1,
-     "LUT": 2609,
+     "LUT": 2600,
      "FF": 256,
      "CARRY": 248,
-     "MUXF": 360
+     "MUXF": 359
     },
     {
      "module": "dma_engine",
@@ -116,10 +119,10 @@
     {
      "module": "csr_axil",
      "instances": 1,
-     "LUT": 812,
+     "LUT": 834,
      "FF": 433,
      "CARRY": 68,
-     "MUXF": 39
+     "MUXF": 34
     },
     {
      "module": "fifo_sync",
@@ -128,6 +131,7 @@
      "LUTRAM": 158,
      "FF": 394,
      "CARRY": 54,
+     "LUTRAM_LUT6": 632,
      "MUXF": 54,
      "BRAM36": 4
     },
@@ -146,7 +150,8 @@
      "LUTRAM": 69,
      "FF": 126,
      "CARRY": 45,
-     "MUXF": 34
+     "MUXF": 34,
+     "LUTRAM_LUT6": 276
     },
     {
      "module": "cmd_proc",
@@ -159,9 +164,9 @@
     {
      "module": "cmd_fields",
      "instances": 3,
-     "LUT": 288,
+     "LUT": 249,
      "CARRY": 240,
-     "MUXF": 63
+     "MUXF": 69
     },
     {
      "module": "cmd_fetch",
@@ -188,67 +193,70 @@
   "array_seq": {
    "module": "array_seq",
    "count": 1,
-   "runtime_s": 67.0,
-   "LUT": 10375,
-   "LUTRAM": 175,
-   "FF": 21401,
-   "CARRY": 574,
-   "MUXF": 50,
-   "DSP": 273,
+   "runtime_s": 29.4,
+   "LUT": 7381,
+   "LUTRAM": 132,
+   "FF": 9189,
+   "CARRY": 1210,
+   "MUXF": 45,
+   "DSP": 73,
    "other": {
     "BUFG": 1,
-    "INV": 16692
+    "INV": 7645
    },
+   "LUTRAM_LUT6": 528,
    "submodules": [
     {
-     "module": "pe",
-     "instances": 256,
-     "LUT": 2560,
-     "FF": 6656,
-     "DSP": 256
+     "module": "pe_pair",
+     "instances": 32,
+     "LUT": 2912,
+     "FF": 4288,
+     "CARRY": 768,
+     "DSP": 64
     },
     {
      "module": "array_seq",
      "instances": 1,
-     "LUT": 2935,
-     "FF": 5143,
-     "CARRY": 277,
-     "MUXF": 22,
+     "LUT": 1585,
+     "FF": 1799,
+     "CARRY": 210,
+     "MUXF": 18,
      "DSP": 1
-    },
-    {
-     "module": "delay_pipe",
-     "instances": 46,
-     "FF": 7301
     },
     {
      "module": "array_seq_rd",
      "instances": 3,
-     "LUT": 2799,
-     "FF": 810,
+     "LUT": 1807,
+     "FF": 554,
      "CARRY": 35
+    },
+    {
+     "module": "delay_pipe",
+     "instances": 21,
+     "FF": 1705
     },
     {
      "module": "array_ctrl",
      "instances": 1,
-     "LUT": 1405,
-     "FF": 1413,
-     "CARRY": 149,
-     "MUXF": 6,
-     "DSP": 16
-    },
-    {
-     "module": "systolic_array",
-     "instances": 1,
-     "LUT": 508
+     "LUT": 753,
+     "FF": 765,
+     "CARRY": 84,
+     "MUXF": 5,
+     "DSP": 8
     },
     {
      "module": "fifo_sync",
      "instances": 11,
      "LUT": 83,
-     "LUTRAM": 175,
+     "LUTRAM": 132,
      "FF": 78,
-     "CARRY": 33
+     "CARRY": 33,
+     "LUTRAM_LUT6": 528
+    },
+    {
+     "module": "systolic_array",
+     "instances": 1,
+     "LUT": 156
     },
     {
      "module": "cmd_fields",
@@ -259,211 +267,223 @@
     },
     {
      "module": "skew",
-     "instances": 3
+     "instances": 2
     }
    ]
   },
   "arr_acc_ram": {
    "module": "scratchpad",
    "count": 1,
-   "runtime_s": 6.7,
-   "LUTRAM": 171,
-   "FF": 513,
+   "runtime_s": 6.0,
+   "LUTRAM": 86,
+   "FF": 257,
    "other": {
     "BUFG": 1,
     "INV": 1
-   }
+   },
+   "LUTRAM_LUT6": 344
   },
   "arr_out_fifo": {
    "module": "spad_fifo",
    "count": 1,
-   "runtime_s": 9.5,
-   "LUT": 1057,
-   "LUTRAM": 171,
-   "FF": 1561,
+   "runtime_s": 7.2,
+   "LUT": 544,
+   "LUTRAM": 43,
+   "FF": 790,
    "CARRY": 9,
-   "MUXF": 513,
+   "MUXF": 267,
    "other": {
     "BUFG": 1,
-    "INV": 22
-   }
+    "INV": 24
+   },
+   "LUTRAM_LUT6": 172
   },
   "arr_gs_fifo": {
    "module": "spad_fifo",
    "count": 1,
-   "runtime_s": 7.6,
-   "LUT": 286,
-   "LUTRAM": 22,
-   "FF": 403,
-   "CARRY": 9,
-   "MUXF": 138,
+   "runtime_s": 6.1,
+   "LUT": 153,
+   "LUTRAM": 11,
+   "FF": 208,
+   "CARRY": 5,
+   "MUXF": 67,
    "other": {
     "BUFG": 1,
-    "INV": 24
-   }
+    "INV": 20
+   },
+   "LUTRAM_LUT6": 44
   },
   "vec_seq": {
    "module": "vec_seq",
    "count": 1,
-   "runtime_s": 890.9,
-   "LUT": 279897,
-   "LUTRAM": 1219,
-   "FF": 578755,
-   "CARRY": 7527,
-   "MUXF": 21940,
-   "DSP": 399,
-   "BRAM36": 12,
+   "runtime_s": 284.9,
+   "LUT": 30071,
+   "LUTRAM": 1117,
+   "FF": 28392,
+   "CARRY": 2110,
+   "MUXF": 1986,
+   "DSP": 99,
+   "BRAM36": 11,
    "other": {
     "BUFG": 1,
-    "INV": 4844
+    "INV": 1608
    },
+   "LUTRAM_LUT6": 3805,
    "submodules": [
-    {
-     "module": "lut_rom",
-     "instances": 82,
-     "LUT": 192692,
-     "FF": 533664,
-     "MUXF": 16384
-    },
     {
      "module": "vec_seq",
      "instances": 1,
-     "LUT": 7872,
-     "FF": 18261,
-     "CARRY": 112,
-     "MUXF": 85,
+     "LUT": 7402,
+     "FF": 18263,
+     "CARRY": 97,
+     "MUXF": 327,
      "DSP": 3
     },
     {
      "module": "vec_alu",
      "instances": 1,
-     "LUT": 19091,
-     "LUTRAM": 17,
-     "FF": 2656,
-     "CARRY": 1569,
-     "MUXF": 976,
-     "DSP": 64
-    },
-    {
-     "module": "layernorm",
-     "instances": 1,
-     "LUT": 12011,
-     "LUTRAM": 99,
-     "FF": 2916,
-     "CARRY": 1004,
-     "MUXF": 969,
-     "DSP": 65,
-     "BRAM36": 12
-    },
-    {
-     "module": "requant",
-     "instances": 2,
-     "LUT": 8388,
-     "LUTRAM": 196,
-     "FF": 3628,
-     "CARRY": 1248
-    },
-    {
-     "module": "srdhm",
-     "instances": 33,
-     "LUT": 4818,
-     "FF": 5346,
-     "CARRY": 1650,
-     "MUXF": 891,
-     "DSP": 132
-    },
-    {
-     "module": "softmax",
-     "instances": 1,
-     "LUT": 7270,
-     "LUTRAM": 97,
-     "FF": 511,
-     "CARRY": 187,
-     "MUXF": 185,
-     "DSP": 17
+     "LUT": 3767,
+     "LUTRAM": 5,
+     "FF": 1304,
+     "CARRY": 181,
+     "MUXF": 296,
+     "DSP": 4,
+     "LUTRAM_LUT6": 5
     },
     {
      "module": "pbuf_loader",
      "instances": 1,
-     "LUT": 5332,
-     "FF": 2264,
-     "CARRY": 762,
-     "MUXF": 80
+     "LUT": 2952,
+     "FF": 1890,
+     "CARRY": 414,
+     "MUXF": 280
+    },
+    {
+     "module": "layernorm",
+     "instances": 1,
+     "LUT": 3363,
+     "LUTRAM": 32,
+     "FF": 1004,
+     "CARRY": 306,
+     "MUXF": 80,
+     "DSP": 17,
+     "BRAM36": 11,
+     "LUTRAM_LUT6": 98
+    },
+    {
+     "module": "requant",
+     "instances": 2,
+     "LUT": 1948,
+     "LUTRAM": 52,
+     "FF": 916,
+     "CARRY": 280,
+     "LUTRAM_LUT6": 52
+    },
+    {
+     "module": "softmax",
+     "instances": 1,
+     "LUT": 1969,
+     "LUTRAM": 50,
+     "FF": 223,
+     "CARRY": 67,
+     "MUXF": 79,
+     "DSP": 5,
+     "LUTRAM_LUT6": 170
     },
     {
      "module": "vec_reduce",
      "instances": 1,
-     "LUT": 3720,
-     "FF": 2026,
-     "CARRY": 216,
-     "MUXF": 240,
-     "DSP": 16
-    },
-    {
-     "module": "vec_seq_wr",
-     "instances": 1,
-     "LUT": 3445,
-     "FF": 1141,
-     "CARRY": 8,
-     "MUXF": 569
+     "LUT": 853,
+     "FF": 874,
+     "CARRY": 90,
+     "MUXF": 26,
+     "DSP": 4
     },
     {
      "module": "vec_seq_rd",
      "instances": 2,
-     "LUT": 2114,
-     "FF": 2284,
-     "CARRY": 86,
-     "MUXF": 70
+     "LUT": 882,
+     "FF": 744,
+     "CARRY": 84,
+     "MUXF": 46
     },
     {
-     "module": "sfu_elem",
+     "module": "lut_rom",
+     "instances": 22,
+     "LUT": 1288,
+     "LUTRAM": 740,
+     "FF": 320,
+     "LUTRAM_LUT6": 2960
+    },
+    {
+     "module": "srdhm",
+     "instances": 9,
+     "LUT": 504,
+     "FF": 900,
+     "CARRY": 189,
+     "MUXF": 243,
+     "DSP": 36
+    },
+    {
+     "module": "vec_seq_wr",
      "instances": 1,
-     "LUT": 1905,
-     "LUTRAM": 279,
-     "FF": 2070,
-     "MUXF": 880
+     "LUT": 898,
+     "FF": 302,
+     "CARRY": 7,
+     "MUXF": 115
+    },
+    {
+     "module": "sfu_rsqrt",
+     "instances": 5,
+     "LUT": 1035,
+     "LUTRAM": 40,
+     "FF": 80,
+     "CARRY": 60,
+     "MUXF": 95,
+     "DSP": 15,
+     "LUTRAM_LUT6": 40
     }
    ]
   },
   "spad_router": {
    "module": "buf_spad",
    "count": 5,
-   "runtime_s": 31.7,
-   "LUT": 18107,
-   "FF": 37,
-   "CARRY": 19,
-   "MUXF": 2644,
+   "runtime_s": 10.5,
+   "LUT": 2134,
+   "FF": 21,
+   "CARRY": 7,
+   "MUXF": 154,
    "other": {
     "BUFG": 1,
-    "INV": 15
-   }
-  },
-  "spad_bank_256": {
-   "module": "spad_bank",
-   "count": 8,
-   "runtime_s": 6.3,
-   "LUT": 16,
-   "BRAM36": 2,
-   "other": {
-    "BUFG": 1
-   }
-  },
-  "spad_bank_512": {
-   "module": "spad_bank",
-   "count": 16,
-   "runtime_s": 5.7,
-   "LUT": 16,
-   "BRAM36": 2,
-   "other": {
-    "BUFG": 1
+    "INV": 11
    }
   },
   "spad_bank_1024": {
    "module": "spad_bank",
-   "count": 16,
-   "runtime_s": 5.6,
+   "count": 2,
+   "runtime_s": 7.2,
    "LUT": 16,
    "BRAM36": 4,
+   "other": {
+    "BUFG": 1
+   }
+  },
+  "spad_bank_2048": {
+   "module": "spad_bank",
+   "count": 4,
+   "runtime_s": 7.5,
+   "LUT": 16,
+   "BRAM36": 8,
+   "other": {
+    "BUFG": 1
+   }
+  },
+  "spad_bank_4096": {
+   "module": "spad_bank",
+   "count": 4,
+   "runtime_s": 7.1,
+   "LUT": 16,
+   "BRAM36": 16,
    "other": {
     "BUFG": 1
    }
@@ -471,8 +491,8 @@
   "glue": {
    "module": "nanoxl_top",
    "count": 1,
-   "runtime_s": 24.7,
-   "LUT": 5269,
+   "runtime_s": 17.3,
+   "LUT": 2459,
    "FF": 7,
    "MUXF": 2,
    "other": {

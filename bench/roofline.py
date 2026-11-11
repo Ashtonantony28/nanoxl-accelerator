@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from nanoxl.cyclemodel import CLASSES, FIXES, estimate, timing_for  # noqa: E402
 from nanoxl.graph import SHAKESPEARE, TINY  # noqa: E402
-from nanoxl.hwconfig import BOARDS, KV260, PYNQ_Z2  # noqa: E402
+from nanoxl.hwconfig import BOARDS, KV260, PLANNING_BOARDS, PYNQ_Z2  # noqa: E402
 
 OUT = ROOT / "bench" / "results"
 MODELS = {"tiny": TINY, "shakespeare": SHAKESPEARE}
@@ -46,7 +46,7 @@ def job(args):
 def jobs(quick):
     out = []
     # A: each board as proposed, every model / width / KV placement / batch
-    for board in BOARDS:
+    for board in PLANNING_BOARDS:
         for model in MODELS:
             for wbits in (8, 4):
                 for kv in ("onchip", "ddr"):
@@ -55,7 +55,7 @@ def jobs(quick):
     if quick:
         return out
     # B: sizing sweep, array N x DDR bandwidth, at each board's clock / lanes
-    for board in BOARDS:
+    for board in PLANNING_BOARDS:
         for n in (8, 16, 32, 64):
             for bw in (1.5, 4, 8, 12):
                 for wbits in (8, 4):
@@ -73,7 +73,7 @@ def jobs(quick):
 def fix_jobs():
     """Each fix alone and cumulatively (in FIXES order), shakespeare batch 1 on both boards."""
     out = []
-    for board in BOARDS:
+    for board in PLANNING_BOARDS:
         kv = "onchip" if board == "kv260" else "ddr"
         for wbits in (8, 4):
             out.append(("fixes", board, "shakespeare", wbits, kv, 1, {}, True, {}, "as built"))

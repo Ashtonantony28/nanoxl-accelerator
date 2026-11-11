@@ -14,7 +14,7 @@
 #   nanoxl_0/m_axi_md  (DMA ch 0) --smc_md---> S_AXI_HP0_FPD  (128 bit) -> DDR_LOW
 #   nanoxl_0/m_axi_md1 (DMA ch 1) --smc_md1--> S_AXI_HP1_FPD  (128 bit) -> DDR_LOW
 #   nanoxl_0/irq -> axi_intc_0 -> pl_ps_irq0     (PYNQ's Interrupt class needs an axi_intc)
-#   pl_clk0 = 250 MHz drives everything; proc_sys_reset_0 from pl_resetn0.
+#   pl_clk0 = 200 MHz (ADR-006; -clk 250 once timing allows) drives everything; proc_sys_reset_0 from pl_resetn0.
 
 set script_dir [file normalize [file dirname [info script]]]
 source [file join $script_dir .. common nanoxl_build.tcl]
@@ -22,14 +22,15 @@ source [file join $script_dir .. common nanoxl_build.tcl]
 set BOARD    kv260
 set PART     xck26-sfvc784-2LV-c
 set BD       nanoxl_bd
-set CLK_MHZ  250
+set CLK_MHZ  200
 set CSR_BASE 0xA0000000
 set INTC_BASE 0xA0010000
 
-# nanoxl_top parameters: keep equal to fpga/boards.py RTL_PARAMS["kv260"] (tests/fpga checks it)
+# nanoxl_top parameters (ADR-006 first bitstream): keep equal to fpga/boards.py RTL_PARAMS["kv260"] (tests/fpga checks it)
+# step-up after a Vivado synth count: -params "N 16 NB 4"  (ADR-006)
 set NX_PARAMS {
-    N 32 L 64 M_DEPTH 64
-    ABUF_LINES 32768 WBUF_LINES 8192 ACC_LINES 16384 PBUF_LINES 4096 KV_LINES 65536 NB 8 RAM_STYLE 2 VP 4
+    N 8 L 4 M_DEPTH 64
+    ABUF_LINES 32768 WBUF_LINES 8192 ACC_LINES 16384 PBUF_LINES 4096 KV_LINES 32768 NB 2 RAM_STYLE 2 VP 1
     CTX_MAX 256 D_MAX 384 NG 6 NSLOT 16 NCTX 8 MAXB 256 LDF 512
 }
 

@@ -26,10 +26,12 @@ set CLK_MHZ  150
 set CSR_BASE 0x40000000
 set INTC_BASE 0x41800000
 
-# nanoxl_top parameters: keep equal to fpga/boards.py RTL_PARAMS["pynq-z2"] (tests/fpga checks it)
+# nanoxl_top parameters: keep equal to fpga/boards.py RTL_PARAMS["pynq-z2"] (tests/fpga checks it).
+# ADR-006: even this smallest useful build (N 8, L 4) needs ~123 % of the XC7Z020 LUTs by Yosys; it will not
+# place until the vector unit shrinks (see docs/fpga.md §2). The script is kept working for that day.
 set NX_PARAMS {
-    N 16 L 16 M_DEPTH 64
-    ABUF_LINES 8192 WBUF_LINES 4096 ACC_LINES 4096 PBUF_LINES 2048 KV_LINES 8192 NB 0 RAM_STYLE 1 VP 4
+    N 8 L 4 M_DEPTH 64
+    ABUF_LINES 8192 WBUF_LINES 4096 ACC_LINES 4096 PBUF_LINES 2048 KV_LINES 8192 NB 2 RAM_STYLE 1 VP 1
     CTX_MAX 256 D_MAX 384 NG 6 NSLOT 16 NCTX 8 MAXB 256 LDF 512
 }
 

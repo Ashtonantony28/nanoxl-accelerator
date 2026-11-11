@@ -19,33 +19,38 @@ LINE = 16  # bytes per scratchpad line
 
 # nanoxl_top parameters (names exactly as in rtl/nanoxl_top.sv / rtl/nanoxl_axi_wrap.v)
 RTL_PARAMS = {
+    # First-bitstream configuration, ADR-006: the largest array / vector width whose Yosys LUT count
+    # (logic + LUTRAM) stays <= 70 % of the XCK26 (62 %); N = 16 is the step-up once Vivado has counted.
     "kv260": dict(
-        N=32, L=64, M_DEPTH=64,
-        ABUF_LINES=32768,      # 512 KiB  -> URAM (8 banks x 4096 lines = 2 URAM288 each)
-        WBUF_LINES=8192,       # 128 KiB  -> BRAM (8 banks x 1024 lines = 4 RAMB36 each)
-        ACC_LINES=16384,       # 256 KiB  -> URAM (8 banks x 2048 lines)
-        PBUF_LINES=4096,       # 64 KiB   -> BRAM (8 banks x 512 lines)
-        KV_LINES=65536,        # 1 MiB    -> URAM (8 banks x 8192 lines = 4 URAM288 each)
-        NB=8,                  # = widest port (ACC, N/4 lines); auto (16) would waste half of every URAM
-        RAM_STYLE=2,           # banks of >= 2048 lines (ABUF, ACC, KVBUF) in URAM288, the rest RAMB36 (SG11b)
-        VP=4,                  # 64-byte VEC engine ports (SG10b)
+        N=8, L=4, M_DEPTH=64,
+        ABUF_LINES=32768,      # 512 KiB  -> URAM (2 banks x 16384 lines = 8 URAM288 each)
+        WBUF_LINES=8192,       # 128 KiB  -> URAM (2 banks x 4096 lines = 2 URAM288 each)
+        ACC_LINES=16384,       # 256 KiB  -> URAM (2 banks x 8192 lines = 4 URAM288 each)
+        PBUF_LINES=4096,       # 64 KiB   -> URAM (2 banks x 2048 lines = 2 URAM288 each)
+        KV_LINES=32768,        # 512 KiB  -> URAM (2 banks x 16384 lines): tiny on chip; shakespeare
+                               #            (1.18 MB of KV) runs the DDR-KV mode at any power-of-two size
+        NB=2,                  # = widest port (array ACC, N/4 = 2 lines); halves the 5 routers vs NB = 4
+        RAM_STYLE=2,           # banks of >= 2048 lines in URAM288 (all five here), the rest RAMB36 (SG11b)
+        VP=1,                  # 16-byte VEC ports: at L = 4 one line already carries a full int32 beat
         CTX_MAX=256, D_MAX=384, NG=6, NSLOT=16, NCTX=8, MAXB=256, LDF=512,
     ),
+    # Reference only: the smallest useful PYNQ-Z2 build does NOT fit the XC7Z020 (ADR-006: Yosys 123 %
+    # of its LUTs). Kept so the flow, the estimate and the emulator tests stay exercised.
     "pynq-z2": dict(
-        N=16, L=16, M_DEPTH=64,
-        ABUF_LINES=8192,       # 128 KiB  (8 banks x 1024 lines = 4 RAMB36 each)
+        N=8, L=4, M_DEPTH=64,
+        ABUF_LINES=8192,       # 128 KiB  (2 banks x 4096 lines = 16 RAMB36 each)
         WBUF_LINES=4096,       # 64 KiB
         ACC_LINES=4096,        # 64 KiB
-        PBUF_LINES=2048,       # 32 KiB   (256-line banks: 2 RAMB36 each, half used)
+        PBUF_LINES=2048,       # 32 KiB
         KV_LINES=8192,         # 128 KiB  (tiny fits on chip; shakespeare uses the DDR-KV mode)
-        NB=0,                  # auto = 8 (2 x widest port: N/4 = VP = 4 lines)
-        RAM_STYLE=1,           # every bank in RAMB36 (the 256-line PBUF banks would otherwise be LUTRAM)
-        VP=4,
+        NB=2,                  # = widest port (N/4 = 2 lines)
+        RAM_STYLE=1,           # every bank in RAMB36
+        VP=1,
         CTX_MAX=256, D_MAX=384, NG=6, NSLOT=16, NCTX=8, MAXB=256, LDF=512,
     ),
 }
 
-CLOCK_MHZ = {"kv260": 250.0, "pynq-z2": 150.0}   # pl_clk0 / FCLK_CLK0 targets (ADR-003)
+CLOCK_MHZ = {"kv260": 200.0, "pynq-z2": 150.0}   # pl_clk0 / FCLK_CLK0 targets (ADR-006: KV260 200 until timed)
 PART = {"kv260": "xck26-sfvc784-2LV-c", "pynq-z2": "xc7z020clg400-1"}
 CSR_BASE = {"kv260": 0xA000_0000, "pynq-z2": 0x4000_0000}   # address of nanoxl_0/s_axil (4 KiB)
 

@@ -30,122 +30,104 @@ Pinned versions this was written for:
 
 ## 1. Board configurations (as built)
 
-`nanoxl_top` needs power-of-two buffer capacities (line addresses wrap), and the banks must land on
-whole BRAM/URAM primitives, so the bitstreams differ from the ADR-003 planning numbers. The compiler
-must never use more than the RTL has; `fpga/boards.py:hwconfig()` gives the matching `HwConfig`
-(structure from the RTL, timing assumptions from ADR-003, 1-row weight port as built).
+**ADR-006** chose these configurations: the first KV260 bitstream is N = 8, L = 4. `nanoxl_top` needs
+power-of-two buffer capacities (line addresses wrap), and the banks must land on whole BRAM/URAM
+primitives, so the bitstreams differ from the ADR-003 planning numbers. The compiler must never use
+more than the RTL has. `fpga/boards.py:hwconfig()` gives the matching `HwConfig`, also available as
+`nanoxl.hwconfig.BOARDS["kv260-fpga"]` / `["pynq-z2-fpga"]`: structure from the RTL, timing assumptions
+from ADR-003, 1-row weight port as built.
 
-| | KV260 (XCK26, `xck26-sfvc784-2LV-c`) | PYNQ-Z2 (`xc7z020clg400-1`) |
+| | KV260 (XCK26, `xck26-sfvc784-2LV-c`) | PYNQ-Z2 (`xc7z020clg400-1`): **does not fit** (ADR-006) |
 |---|---|---|
-| clock (pl_clk0 / FCLK_CLK0) | 250 MHz | 150 MHz requested (the PS7 PLLs give the nearest value) |
-| array `N`, lanes `L` | 32, 64 | 16, 16 |
-| `NB` banks / buffer | **8** (= widest port; auto would be 16) | 8 (auto) |
-| ABUF | 512 KiB, URAM (8 × 4096 lines = 2 URAM288 per bank) | 128 KiB, BRAM |
-| WBUF | 128 KiB, BRAM | 64 KiB, BRAM |
-| ACC | 256 KiB, URAM (8 × 2048 lines) | 64 KiB, BRAM |
-| PBUF | 64 KiB, BRAM | 32 KiB, BRAM |
-| KVBUF | **1 MiB** URAM (ADR-003: 1.5 MiB, not a power of two) | 128 KiB (tiny on chip; shakespeare: DDR-KV mode) |
-| URAM / BRAM36 for scratchpads | 64 / 48 of 64 / 144 | 0 / 104 of 0 / 140 |
+| clock (pl_clk0 / FCLK_CLK0) | **200 MHz** (`-clk 250` once timing is known) | 150 MHz requested (the PS7 PLLs give the nearest value) |
+| array `N`, lanes `L`, VEC ports `VP` | **8, 4, 1** (16-byte ports) | 8, 4, 1 (reference build) |
+| `NB` banks / buffer | **2** (= widest port, array ACC N/4) | 2 |
+| ABUF | 512 KiB, URAM (2 × 16384 lines = 8 URAM288 per bank) | 128 KiB, BRAM |
+| WBUF | 128 KiB, URAM (2 × 4096 lines) | 64 KiB, BRAM |
+| ACC | 256 KiB, URAM (2 × 8192 lines) | 64 KiB, BRAM |
+| PBUF | 64 KiB, URAM (2 × 2048 lines) | 32 KiB, BRAM |
+| KVBUF | **512 KiB** URAM (tiny on chip; shakespeare DDR-KV) | 128 KiB (tiny on chip; shakespeare: DDR-KV mode) |
+| URAM / BRAM36 for scratchpads | 48 / 0 of 64 / 144 | 0 / 104 of 0 / 140 |
 | `NG` (GELU slots) | 6 (shakespeare) | 6 |
+| step-up (ADR-006) | `-params "N 16 NB 4"` after a Vivado synthesis count (~340 tok/s instead of ~175) | none until the vector unit shrinks |
 
-Why `NB = 8` on the KV260: with the automatic 16 banks every URAM bank would be 2048 lines deep,
-half of a 4096-deep URAM288, and ABUF + KVBUF alone would need all 64 URAMs. With 8 banks ABUF, ACC and
-KVBUF fit exactly into 64. Cost: the array ACC port (8 lines/beat) then covers every bank, so a VEC read
-of ACC and an array ACC beat in the same cycle always conflict (arbitration still bounds the wait;
-functionally identical, docs/top.md §3). If ACC goes to BRAM instead (64 RAMB36), `NB = 16` is possible
-for ACC only (`ACC_NB = 16`, per-buffer bank counts since SG11b).
-
-KV260 `shakespeare` with on-chip KV needs 1.18 MB > 1 MiB: run it with `--kv ddr` (ADR-003 batch > 1
-mode; ~5 % slower decode in the model). `tiny` fits on chip on both boards.
+KV260 `shakespeare` with on-chip KV needs 1.18 MB. A power-of-two KVBUF that holds it is 2 MiB, all 64
+URAMs, so shakespeare always runs with `--kv ddr` (ADR-003 batch > 1 mode). `tiny` fits on chip on both boards. With every bank ≥ 2048 lines deep at NB = 2,
+`RAM_STYLE = 2` puts all five buffers into URAM288. The deepest banks (ABUF, KVBUF: 16384 lines) are
+cascades of 4 URAMs, half of the 1 MiB KVBUF's 8.
 
 ## 2. Resource estimates (Yosys)
 
 `python3 fpga/yosys/estimate.py kv260` / `pynq-z2` (Yosys 0.33, `synth_xilinx -family xcup -uram` /
 `-family xc7`). A whole-design flat run did not finish within 10 minutes even at N = 8, so the script
-synthesizes per block and sums (each block hierarchically, so 1024 PEs cost one PE synthesis): `ctrl_top`,
-`array_seq`, `vec_seq`, the scratchpad router (`buf_spad` with its banks as black boxes, counted 5 times:
-the five instances differ only in row-address width), one `spad_bank` per distinct depth (counted
-`NB` × buffers), and the `nanoxl_top` glue (blocks as black boxes). Results with per-block detail:
+synthesizes per block and sums: `ctrl_top`, `array_seq`, `vec_seq`, the scratchpad router (`buf_spad` with
+its banks as black boxes, counted 5 times, because the five instances differ only in row-address width),
+one `spad_bank` per distinct depth (counted `NB` × buffers), and the `nanoxl_top` glue (blocks as black
+boxes). Each block is synthesized hierarchically, so 1024 PEs cost one PE synthesis. `--params N=16,L=8,...`
+estimates any other configuration (not written). Results with per-block detail:
 `bench/results/resources_kv260.json`, `resources_pynq-z2.json`.
 
-Totals against the device (Yosys `INV` cells, which Vivado folds into LUTs, are left out; the PS7 /
-PS8 and the SmartConnect / interrupt IPs are not included; they add roughly 5-10 k LUTs):
+**LUT = LUT (logic) + LUT-as-memory** in LUT6 sites (`RAM32M16` / `RAM64M8` = 8, `RAM32M` / `RAM64M` = 4,
+`SRL16E` = 1; `LUTRAM_LUT6` in the JSON). Since C1 the SFU tables are LUTRAM, which is 4–12 k LUT; the
+SG9a numbers did not count it. `INV` cells, which Vivado folds into LUTs, are left out. The PS8 / PS7, the
+SmartConnects and the interrupt controller are not included either; they add roughly 5–10 k LUT.
+**ADR-006 fit target: LUT ≤ 70 % of the device, other resources ≤ 80 %.**
+
+Totals for the configurations of §1:
 
 | resource | KV260 (XCK26) used / avail | % | PYNQ-Z2 (XC7Z020) used / avail | % |
 |---|---|---|---|---|
-| LUT | 1,767,319 / 117,120 | **1509 %** | 558,168 / 53,200 | **1049 %** |
-| FF | 2,356,120 / 234,240 | **1006 %** | 605,464 / 106,400 | **569 %** |
-| DSP | 2,658 / 1,248 | **213 %** | 722 / 220 | **328 %** |
-| BRAM36 (RAMB18 = ½) | 114.5 / 144 | 80 % | 128 / 140 | 91 % |
-| URAM288 | 64 / 64 | 100 % | – | – |
-| Yosys CPU time, sum of jobs (`--jobs 1`) | 4,470 s (vec_seq alone 3,731 s) | | 1,505 s (vec_seq 1,210 s) | |
+| LUT (logic + LUTRAM) | 72,792 / 117,120 | **62.2 %** | 65,205 / 53,200 | **122.6 %** |
+| of which LUTRAM (LUT6 sites) | 5,541 | | 5,801 | |
+| FF | 43,048 / 234,240 | 18.4 % | 41,586 / 106,400 | 39.1 % |
+| DSP | 140 / 1,248 | 11.2 % | 172 / 220 | 78.2 % |
+| BRAM36 (RAMB18 = ½) | 15 / 144 | 10.4 % | 119 / 140 | 85.0 % |
+| URAM288 | 48 / 64 | 75.0 % | – | – |
+| Yosys CPU time, sum of jobs (`--jobs 1`) | 433 s (vec_seq 292 s) | | 422 s (vec_seq 288 s) | |
 
-Per block (LUT / FF / DSP / memory; count = instances in the sum):
+Per block (LUT incl. LUTRAM / FF / DSP / memory; count = instances in the sum), N = 8, L = 4, VP = 1, NB = 2:
 
-| block | count | KV260 (N = 32, L = 64) | PYNQ-Z2 (N = 16, L = 16) |
+| block | count | KV260 | PYNQ-Z2 |
 |---|---|---|---|
-| `ctrl_top` (cmd fetch, CSRs, DMA ×2) | 1 | 8.5 k / 2.6 k / 0 / 4 BRAM36 | 8.0 k / 2.6 k / 0 / 4 BRAM36 |
-| `array_seq` (array, array_ctrl, reader/writer) | 1 | 61 k / 112 k / 1,057 | 10.4 k / 21 k / 273 |
-| array_ctrl memories (acc ram, out / gs FIFOs) | 3 | 2.6 k / 3.9 k / 0 / 29 BRAM18 | 1.3 k / 2.5 k / 0 / LUTRAM |
-| `vec_seq` (vector unit, SFUs, LN, softmax, PBUF loader) | 1 | **1,211 k / 2,238 k / 1,551** / 48 BRAM36 | **336 k / 579 k / 399** / 12 BRAM36 |
-| of which `lut_rom` (exp2 / recip / rsqrt / GELU tables) | 322 / 82 | **781 k / 2,110 k** / 0 | **193 k / 534 k** / 0 |
-| scratchpad router (`buf_spad` minus banks) | 5 | 95 k / 0 / 10 each | 39 k / 0 / 10 each |
-| scratchpad banks | 40 / 40 | 48 BRAM36 + 64 URAM | 112 BRAM36 |
-| `nanoxl_top` glue | 1 | 6.8 k / 0 / 0 | 5.3 k / 0 / 0 |
+| `ctrl_top` (cmd fetch, CSRs, DMA ×2) | 1 | 9.4 k / 2.6 k / 0 / 4 BRAM36 | 8.9 k / 2.6 k / 0 / 4 BRAM36 |
+| `array_seq` (array, array_ctrl, reader/writer) | 1 | 7.9 k / 9.2 k / 41 | 7.9 k / 9.2 k / 73 (no DSP48E1 packing) |
+| array_ctrl memories (acc ram, out / gs FIFOs) | 3 | 1.2 k / 1.3 k / 0 | 1.3 k / 1.3 k / 0 |
+| `vec_seq` (vector unit, SFUs, LN, softmax, PBUF loader) | 1 | **35.5 k** / 29.8 k / 99 / 11 BRAM36 | 33.9 k / 28.4 k / 99 / 11 BRAM36 |
+| scratchpad router (`buf_spad` minus banks) | 5 | 3.0 k / 0 / 0 each | 2.1 k / 0 / 0 each |
+| scratchpad banks | 10 | 48 URAM | 104 BRAM36 |
+| `nanoxl_top` glue | 1 | 2.5 k / 0 / 0 | 2.5 k / 0 / 0 |
 
-Biggest leaf modules in `vec_seq` (`python3 fpga/yosys/breakdown.py sim_build/fpga/<board>/vec_seq.stat`),
-KV260: `lut_rom` ×322 781 k LUT / 2.11 M FF; `vec_alu` 104 k LUT / 256 DSP; `layernorm` 54 k / 257 DSP;
-`vec_seq_rd` ×2 50 k; `requant` ×2 34 k; `srdhm` ×129 516 DSP; `softmax` 32 k / 65 DSP; `vec_reduce` 23 k /
-64 DSP; `sfu_rsqrt` ×65 and `sfu_recip` ×65 195 DSP each. In `array_seq`: 1,024 `pe` (1 DSP, 58 FF each)
-and 30 k FF of skew `delay_pipe`.
+Biggest leaf modules in `vec_seq` at L = 4 (`python3 fpga/yosys/breakdown.py <work dir>/vec_seq.stat`), KV260:
+`vec_seq` own sequencing 7.4 k LUT / 18.3 k FF; `vec_alu` 3.9 k; `layernorm` 3.8 k + 11 BRAM36; `pbuf_loader`
+3.0 k; `lut_rom` ×22 1.2 k + 2.7 k LUTRAM; `softmax` 2.1 k; `requant` ×2 1.9 k; `srdhm` ×9 1.1 k / 36 DSP.
+In `ctrl_top`: `sem_unit` 3.1 k LUT / 1.5 k MUXF.
 
-### 2.1 What the numbers say
+### 2.1 What the numbers say (configuration sweep, ADR-006)
 
-**Neither configuration fits, by a wide margin, and memory is not the problem.** BRAM / URAM are within
-budget on both boards (the buffer sizes of §1 were chosen for that). LUT, FF and DSP are 2-15× over.
-The causes are concentrated:
+**With C1–C9 merged, the KV260 holds an N = 8 / L = 4 NanoXL with margin. N = 16 is borderline by Yosys,
+and N = 32 or L ≥ 16 do not fit. No useful configuration fits the PYNQ-Z2.** KV260 sweep (Yosys LUT incl.
+LUTRAM; shakespeare decode W8 / W4 and 256-token prefill in the cycle model at 250 MHz, DDR KV; the full
+table with FF / DSP / BRAM / URAM is in ADR-006):
 
-1. **`lut_rom` is 44 % of the KV260 LUTs and 90 % of its FFs** (C1). The SFU tables are written several
-   entries per cycle into an entry-wide array, which no RAM primitive implements, so every table becomes
-   registers plus a 256:1 mux, and there are 322 of them (one per lane per function). Re-organized as lines
-   they are LUTRAM: −740 k LUT, −2.1 M FF on the KV260, −183 k LUT, −534 k FF on the PYNQ-Z2.
-2. **The scratchpad routers** (C2): 5 × 95 k LUT and 50 DSPs that a static crossbar does not need.
-   −400 k LUT (KV260), −170 k (PYNQ-Z2).
-3. **DSPs**: elementwise RECIP / RSQRT at full width (390 DSP, never emitted by the compiler: C3), VEC MUL
-   64 × 64 (C4), 1 DSP per PE without INT8 packing (C5), two 64-lane requantizers (C6).
-4. **The vector width.** Everything in `vec_seq` scales with `L`: at L = 16 (PYNQ-Z2 build) `vec_seq` minus
-   its tables is 143 k LUT; at L = 64 it is 430 k.
+| N, L, VP, NB | LUT | % of 117 k | DSP | shakespeare tok/s W8 / W4 | prefill ms |
+|---|---|---|---|---|---|
+| 32, 64, 4, 8 (SG9a, before C1–C9) | 1,767 k | 1509 % | 2,658 | 607 / 644 | 15.3 |
+| 32, 16, 4, 8 | > 198 k (routers + vec_seq alone) | > 169 % | | 607 / 642 | 17.2 |
+| 16, 16, 4, 8 | 228.5 k | 195 % | 448 | 344 / 325 | 51.0 |
+| 16, 8, 1, 4 | 116.9 k | 99.9 % | 328 | 342 / 323 | 55.2 |
+| 16, 4, 1, 4 (step-up) | 97.0 k | 82.8 % | 244 | 340 / 321 | 60.7 |
+| 8, 8, 1, 2 | 93.5 k | 79.8 % | 224 | 175 / 156 | 193.3 |
+| **8, 4, 1, 2 (built; 200 MHz: 139 / 125 tok/s, 248 ms)** | **72.8 k** | **62.2 %** | 140 | 174 / 156 | 198.8 |
 
-Arithmetic, KV260 (LUT; FF and BRAM then fit, DSP noted):
-
-| configuration | LUT | % of 117 k | DSP |
-|---|---|---|---|
-| as built (N = 32, L = 64) | 1,767 k | 1509 % | 2,658 |
-| + C1 + C2 | ~630 k | ~540 % | ~2,600 |
-| + C3 + C4 (C1-C6) | ~540 k | ~460 % | ~1,450 |
-| N = 32, **L = 16**, C1 + C2 (vec_seq from the PYNQ run, routers ~12 k each after C2) | ~280 k | ~240 % | ~1,450 |
-| + C9 (`vec_seq_rd` / `vec_seq` selects, ~50 k at L = 16) + C3/C4 at L = 16 | ~220 k | ~190 % | ~1,200 |
-| … and N = 16 (array 10 k instead of 61 k) | ~170 k | ~145 % | ~420 |
-
-PYNQ-Z2 with C1 + C2: ~205 k LUT (385 % of 53 k), FF ~71 k (67 %), DSP ~670 (C5 and C6 bring it to ~480,
-still 2×).
-
-So **the as-designed NanoXL does not fit either board even after the cheap RTL fixes**, by Yosys's count.
-Two qualifications before acting on it: Yosys over-counts LUTs on wide muxes and arithmetic by 10-40 %
-against Vivado (§2.2), and it does not share logic across the summed blocks; and the remaining ~140 k LUT of
-`vec_seq` at L = 16 has not been broken down to the RTL line yet (C9 is the first, visible part). The
-realistic plan is:
-
-* **Do C1 and C2 first** (they are the bulk, they are internal re-implementations, and they change no
-  result), then re-run `estimate.py` (cached jobs are skipped; only changed blocks re-synthesize).
-* **Then run Vivado synthesis (not implementation) on the KV260 with `-params "L 16"`** and
-  `-proj_only`/`launch_runs synth_1` to get the real LUT count; Vivado's number decides between "N = 32,
-  L = 16" and "N = 16, L = 16" for the first bitstream. `L` and `N` are parameters; the compiler takes the
-  matching `HwConfig` from `fpga/boards.py`.
-* **The PYNQ-Z2 is not a viable first target** for the full datapath: even at ~150 k LUT after all of C1-C9
-  it is 3× the XC7Z020. It stays in the flow (scripts, tests) for a reduced build (e.g. N = 8, L = 8) once
-  the KV260 numbers are known.
-* DSP: on the KV260 at L = 16 the DSP budget is met with C3-C6; at L = 64 even C3-C6 together (~1,450) leave it over.
+1. **N sets decode speed; L and VP barely matter.** With one weight row per cycle into the array, decode is
+   weight-port bound: about 340 tok/s at N = 16, 175 at N = 8. Going from L = 16 to 4 costs 19 % of
+   prefill and < 1 % of decode.
+2. **Area is `vec_seq` (scales with L) plus the five routers (scale with NB × the widest port).** `vec_seq`
+   is 96 k / 55 k / 35 k LUT at L = 16 / 8 / 4. One router is 20.4 k at N = 32 (NB ≥ 8 forced by the 8-line
+   ACC port), 18.7 k at N = 16 / VP = 4 / NB = 8, 4.9 k at NB = 4 / VP = 1 and 3.0 k at N = 8 / NB = 2.
+3. **DSP, BRAM and URAM are no longer constraints** on the KV260 (≤ 36 % DSP in every row). LUTs are.
+4. **PYNQ-Z2**: the N = 8 / L = 4 build is 123 % of the XC7Z020's LUTs. Its floor (vec_seq ~31 k + ctrl_top
+   ~9 k + routers ~10 k + glue) is already near 100 %. It needs the RTL work listed in ADR-006 ("Step-up").
 
 ### 2.2 Yosys caveats
 
@@ -160,7 +142,7 @@ realistic plan is:
   casts in synthesis-only copies because Yosys 0.33's SystemVerilog frontend rejects them; the logic is
   unchanged. Vivado reads the original files.
 
-### 2.3 Change list for the RTL owners (not applied: outside SG9a's paths)
+### 2.3 Change list for the RTL owners (C1–C9 all done; next candidates: ADR-006 "Step-up")
 
 Ordered by resources saved. None changes what the compiler emits or any numeric result; each is an
 internal re-implementation the owner's existing tests cover. Estimates are rough (from the Yosys counts).
@@ -194,13 +176,8 @@ unless marked). LUT / FF / DSP (LUTRAM in LUT6 units listed separately):
 | **`sfu`** (as built: EL = 8, SM_RQL = 16) | **937,572 / 2,170,823 / 972** | **117,136 / 35,657 / 444** | **237,346 / 549,719 / 252** | **39,392 / 14,365 / 204** |
 | `sfu` LUTRAM / BRAM36 | 6,424 / 48 | 9,259 / 48 | 1,648 / 12 | 2,764 / 12 |
 
-`bench/results/resources_*.json` are not re-run yet (the `vec_seq` job alone is ~1 h of Yosys); the `sfu`
-row is what moves inside `vec_seq`: KV260 −820 k LUT, −2.14 M FF, −528 DSP; PYNQ-Z2-size (L = 16) −198 k LUT,
-−535 k FF, −48 DSP.
-
-With C1-C6 the KV260 estimate drops to roughly 0.54 M LUT, still 4.6× the XCK26; with L = 16 and C1, C2,
-C9 to ~220 k (§2.1 has the table). **The first KV260 bitstream therefore needs L = 16 and probably N = 16,
-to be decided by a Vivado synthesis run after C1 and C2.**
+The `sfu` row is what moved inside `vec_seq`. `bench/results/resources_*.json` have been re-run since
+with all of C1–C9 merged, for the ADR-006 configurations (§2, §2.1).
 
 ## 3. Block design and address map
 
@@ -212,7 +189,7 @@ to be decided by a Vivado synthesis run after C1 and C2.**
    S_AXI_HP0_FPD  (128 b) ─ smc_md  ─ nanoxl_0/m_axi_md                                        └─ m_axi_md
    S_AXI_HP1_FPD  (128 b) ─ smc_md1 ─ nanoxl_0/m_axi_md1      S_AXI_HP1 (64 b) ─ smc_md1 ─ m_axi_md1
    pl_ps_irq0 ─ axi_intc_0 ─ nanoxl_0/irq                     IRQ_F2P ─ axi_intc_0 ─ nanoxl_0/irq
-   pl_clk0 250 MHz, proc_sys_reset_0 (pl_resetn0)             FCLK_CLK0 150 MHz, proc_sys_reset_0
+   pl_clk0 200 MHz, proc_sys_reset_0 (pl_resetn0)             FCLK_CLK0 150 MHz, proc_sys_reset_0
 ```
 
 | segment | KV260 | PYNQ-Z2 | size |
@@ -225,7 +202,7 @@ to be decided by a Vivado synthesis run after C1 and C2.**
 
 The port assignment is ADR-005 §4 (docs/control.md §4): fetch (`mf`), DMA channel 0 (`md`, ISA
 `chan & 1 = 0`) and DMA channel 1 (`md1`, `chan & 1 = 1`) are separate masters. On the KV260 each DMA
-channel has its own 128-bit HP port (2 × 4 GB/s at 250 MHz, the 8 GB/s ADR-003 assumes) and fetch uses
+channel has its own 128-bit HP port (2 × 4 GB/s at 250 MHz, the 8 GB/s ADR-003 assumes; 2 × 3.2 GB/s at the first bitstream's 200 MHz) and fetch uses
 HPC0 (no coherency is requested: AxCACHE = 0011, the CMA buffer is uncached). On the PYNQ-Z2 fetch
 (~1 % of the traffic) shares HP0 with DMA channel 0 through a 2:1 SmartConnect, and the SmartConnects
 convert 128 → 64 bits. Everything the driver needs is in the `.hwh`: `PynqBackend` takes
@@ -326,9 +303,9 @@ behaviour. Look for collision warnings in the synthesis log, and the DMA loopbac
 single-layer step catch a violation. The PYNQ-Z2 at 150 MHz on a -1 Zynq-7020 has the same list
 (T1 and T4 are the likely failures; DSP48E1 is 25 × 18, so 32 × 32 needs 4 of them too).
 
-Fallbacks without RTL changes: `-clk 200` (KV260) / `-clk 125` (PYNQ-Z2) and keep `CLOCK_MHZ` in
+The KV260 first bitstream already runs at 200 MHz (ADR-006); `-clk 250` is the step-up once this list is clear. Fallbacks without RTL changes: `-clk 150` (KV260) / `-clk 125` (PYNQ-Z2) and keep `CLOCK_MHZ` in
 `fpga/boards.py` in step (the cycle-model numbers scale with the clock); `-strategy
-Performance_ExtraTimingOpt`; for resources, `-params "N 16 L 16"` on the KV260 as a first bitstream.
+Performance_ExtraTimingOpt`; for resources, the first bitstream is already the N = 8 / L = 4 build (ADR-006).
 
 ## 6. First-light checklist
 
@@ -340,7 +317,7 @@ stops at the first failure (the same script runs against the emulator in `tests/
 | 1 | **CSR** | ID = `0x4E584C43` ("NXLC"), VERSION = `0x00010000`, RING_BASE / RING_SIZE / IRQ_EN read back, STATUS ring-cfg-ok, ERR 0 | ID = 0 or `0xFFFFFFFF`: wrong `--ip` / base address (check `Overlay.ip_dict`), PL not loaded, or the core held in reset (`aresetn`) |
 | 2 | **END** | one-word END program: END_COUNT +1, IRQ_STATUS bit 0, W1C clears it | RING_HEAD stuck at 0: fetch master cannot reach DDR (HPC0 / HP0 address map, AxCACHE, CMA physical address) |
 | 3 | **DMA loopback** | 16 KiB random bytes DMA_LOAD → each of ABUF / WBUF / ACC / PBUF / KVBUF (top of the buffer) → DMA_STORE: unchanged, with loads and stores on both DMA channels | ERR 5: BRESP/RRESP error (HP0 / HP1 map of `md` / `md1`); data mismatch in one buffer: its bank mapping / `RAM_STYLE` / URAM read-collision behaviour |
-| 4 | **DDR bandwidth** | 1 MiB loads on channel 0, channel 1 and both at once, one 1 MiB store; GB/s from PERF_CYCLES at the board clock. Ceiling per channel: 4 GB/s on the KV260 (128 b × 250 MHz), so up to 8 GB/s with both; PYNQ-Z2 1.2 GB/s per 64-bit HP port at 150 MHz, both together bounded by its ~1.5 GB/s DDR. Record it: ADR-003's largest unknown | far below: SmartConnect width/clock conversion, HP port width not 128 b; both-channel number ≈ one-channel number: the two masters land on the same port |
+| 4 | **DDR bandwidth** | 1 MiB loads on channel 0, channel 1 and both at once, one 1 MiB store; GB/s from PERF_CYCLES at the board clock. Ceiling per channel on the KV260: 128 b × the clock, i.e. 3.2 GB/s at 200 MHz (4 GB/s at 250), so up to 6.4 (8) GB/s with both; PYNQ-Z2 1.2 GB/s per 64-bit HP port at 150 MHz, both together bounded by its ~1.5 GB/s DDR. Record it: ADR-003's largest unknown | far below: SmartConnect width/clock conversion, HP port width not 128 b; both-channel number ≈ one-channel number: the two masters land on the same port |
 | 5 | **single layer** | 4-token prefill of a 1-layer cut of tiny W8A8: every logit == `nanoxl.golden` (exercises GEMM, REQUANT, LN, softmax, GELU, KV_APPEND) | reproduce in the SimBackend and Verilator (docs/driver.md §3.6), single-step with CTRL bit 0 |
 | 6 | **full tiny generate** | reference prompt + 32 greedy tokens == `artifacts/models/tiny/golden_ref.json` | compare per-step logits with `Golden.forward`; SAT_* with golden saturation counts |
 
@@ -361,6 +338,8 @@ Afterwards: `PERF_*` per step vs `nanoxl.cyclemodel` at the board's DDR latency 
 | `test_hwconfig_fits_rtl_and_runs_tiny[...]` | as-built `HwConfig` within the RTL capacities (powers of two, 17-bit line addresses), tiny generates == golden on it (emulator) |
 | `test_first_light_sim[...]`, `test_first_light_reports_failure`, `test_run_board_cli[...]` | the board tools against the emulator, and a corrupted loopback is reported as FAIL |
 | `test_resource_estimates_current[...]` | `bench/results/resources_*.json` exist for today's `RTL_PARAMS`, contain every block, and record no failed job |
+| `test_hwconfig_boards_mirror_fpga[...]` | `nanoxl.hwconfig.BOARDS["<board>-fpga"]` == `fpga/boards.py:hwconfig(board)` (ADR-006) |
+| `test_board_rtl_tiny[...]` (slow, Verilator) | `nanoxl_top` with exactly `RTL_PARAMS["kv260"]` runs the tiny headline test (16-token prompt + 8 decode steps, W8A8 / W4A8, on-chip / DDR KV) bit-exact vs golden |
 
 Mutation check: swapping two bytes of `m_axi_md_rdata` inside the wrapper makes `test_wrap_smoke` fail
 (`step 0: logits differ at 130 entries`); tying `md_axi_rlast` to `rvalid` hangs it.

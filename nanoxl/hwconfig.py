@@ -60,4 +60,13 @@ PYNQ_Z2 = HwConfig(name="pynq-z2", array_n=16, clock_mhz=150.0, lanes=16, ddr_gb
                    ddr_latency_ns=400.0, burst_bytes=128,
                    abuf=192 * KiB, wbuf=64 * KiB, acc=96 * KiB, pbuf=32 * KiB, kvbuf=96 * KiB, panel_bytes=16 * KiB, wload_rows_per_cycle=1,
                    kv_onchip=False)
-BOARDS = {"kv260": KV260, "pynq-z2": PYNQ_Z2}
+# As-built bitstream configurations (ADR-006): copies of fpga/boards.py:hwconfig(board) so the driver CLI
+# and bench scripts can name them without importing fpga/ (tests/fpga checks they stay equal). The
+# planning configs above remain the ADR-003 sizing study. KV260 first bitstream: N = 8, L = 4, 200 MHz,
+# 512 KiB KVBUF (shakespeare runs with kv_onchip=False). PYNQ-Z2: reference only, does not fit the device.
+KV260_FPGA = KV260.with_(name="kv260-fpga", array_n=8, lanes=4, clock_mhz=200.0, kvbuf=512 * KiB,
+                         wload_rows_per_cycle=1)
+PYNQ_Z2_FPGA = PYNQ_Z2.with_(name="pynq-z2-fpga", array_n=8, lanes=4, abuf=128 * KiB, acc=64 * KiB,
+                             kvbuf=128 * KiB)
+BOARDS = {"kv260": KV260, "pynq-z2": PYNQ_Z2, "kv260-fpga": KV260_FPGA, "pynq-z2-fpga": PYNQ_Z2_FPGA}
+PLANNING_BOARDS = ("kv260", "pynq-z2")

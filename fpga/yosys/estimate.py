@@ -44,6 +44,11 @@ CLASSES = {
     "BRAM18": re.compile(r"^RAMB18E[12]$"),
     "URAM": re.compile(r"^URAM288$"),
 }
+# LUT6 sites per distributed-RAM / shift-register primitive (UG574 / UG474): LUT-as-memory occupies SLICEM
+# LUTs, so the device LUT budget is LUT (logic) + these
+LUTRAM_LUT6 = {"RAM32M16": 8, "RAM64M8": 8, "RAM32M": 4, "RAM64M": 4, "RAM32X1D": 2, "RAM64X1D": 2,
+               "RAM128X1D": 4, "RAM32X1S": 1, "RAM64X1S": 1, "RAM128X1S": 2, "RAM256X1S": 4,
+               "SRL16E": 1, "SRLC16E": 1, "SRLC32E": 1}
 BLOCK_MODULES = ("ctrl_top", "array_seq", "vec_seq", "buf_spad")
 # Pre-synthesis steps. Memories with many read ports -- array_seq's K-transposer `trc` (64 x 256 b, 32 read
 # ports at N=32), vec_seq's per-lane tables (t_cols, t_end, rec_bias, ... with L+1 read ports) -- send
@@ -72,6 +77,7 @@ def classify(cells: dict) -> dict:
         else:
             other[name] = n
     out["other"] = other
+    out["LUTRAM_LUT6"] = sum(n * LUTRAM_LUT6.get(name, 8) for name, n in cells.items() if CLASSES["LUTRAM"].match(name))
     return out
 
 
@@ -199,11 +205,12 @@ def run(board: str, params: dict, write: bool = True, tag: str = "", jobs: int =
     util = {}
     for k in ("LUT", "FF", "DSP", "BRAM36", "URAM"):
         have = dev.get(k, 0)
-        used = tot[k] + (tot["BRAM18"] / 2 if k == "BRAM36" else 0)
+        used = tot[k] + (tot["BRAM18"] / 2 if k == "BRAM36" else 0) + (tot["LUTRAM_LUT6"] if k == "LUT" else 0)
         util[k] = {"used": used, "avail": have, "pct": round(100 * used / have, 1) if have else None,
                    "over": bool(have and used > have) or (not have and used > 0)}
     res = {"board": board, "device": dev["name"],
            "yosys": subprocess.run(["yosys", "-V"], capture_output=True, text=True).stdout.strip(),
+           "lut_note": "utilization LUT = LUT (logic) + LUTRAM_LUT6 (distributed RAM / SRL in LUT6 sites); INV excluded",
            "command": f"synth_xilinx {' '.join(FAMILY[board])}, per block (hierarchical), summed",
            "params": params, "runtime_s": round(wall, 1), "cpu_s": round(sum(b["runtime_s"] for b in per_block.values()), 1),
            "jobs": jobs, "totals": tot, "utilization": util,
@@ -234,7 +241,7 @@ def main(argv=None):
             print(f"  {n:16s} FAILED after {b['runtime_s']} s (see sim_build/fpga/{a.board}{tag}/{n}.log)")
             continue
         print(f"  {n:16s} x{b['count']:<3} {b['runtime_s']:7.1f} s  " +
-              " ".join(f"{k}={b[k]}" for k in ("LUT", "FF", "DSP", "BRAM36", "BRAM18", "URAM", "LUTRAM") if k in b))
+              " ".join(f"{k}={b[k]}" for k in ("LUT", "FF", "DSP", "BRAM36", "BRAM18", "URAM", "LUTRAM", "LUTRAM_LUT6") if k in b))
     for k, u in res["utilization"].items():
         print(f"  {k:7s} {u['used']:>9} / {u['avail']:<7} {'' if u['pct'] is None else str(u['pct']) + ' %'}"
               f"{'  OVER' if u['over'] else ''}")

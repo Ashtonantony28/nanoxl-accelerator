@@ -108,7 +108,7 @@ def test_build_tcl_options(tmp_path):
     lines = dry_run("kv260", tmp_path, "-clk", "200", "-params", "N 16 L 16", "-proj_only")
     assert cell_config(lines, "zynq_ultra_ps_e_0")["PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ"] == "200"
     cfg = cell_config(lines, "nanoxl_0")
-    assert cfg["N"] == "16" and cfg["L"] == "16" and cfg["KV_LINES"] == "65536"
+    assert cfg["N"] == "16" and cfg["L"] == "16" and int(cfg["KV_LINES"]) == boards.RTL_PARAMS["kv260"]["KV_LINES"]
     assert not any(ln.startswith("launch_runs") for ln in lines)
     r = subprocess.run(["tclsh", str(STUB), str(tmp_path / "x.log"), str(BUILD["kv260"]), "-bogus"],
                        capture_output=True, text=True, cwd=ROOT)
@@ -244,6 +244,14 @@ def test_wrapper_lint():
 
 
 # ---------------------------------------------------------------- as-built HwConfig
+@pytest.mark.parametrize("board", sorted(BUILD))
+def test_hwconfig_boards_mirror_fpga(board):
+    """nanoxl.hwconfig.BOARDS['<board>-fpga'] (what the driver CLI / bench scripts can name without
+    importing fpga/) is exactly fpga/boards.py:hwconfig(board), the bitstream's configuration (ADR-006)."""
+    from nanoxl.hwconfig import BOARDS
+    assert BOARDS[f"{board}-fpga"] == boards.hwconfig(board)
+
+
 @pytest.mark.parametrize("board", sorted(BUILD))
 def test_hwconfig_fits_rtl_and_runs_tiny(board):
     from nanoxl.driver import SimBackend, open_bundle

@@ -6,13 +6,18 @@
 // N-1-c cycles so that the whole INT32 output row leaves on one cycle.
 //
 // Timing (cycle numbers relative to the cycle T in which in_valid is high):
-//   PE(r,c) multiplies element r of that row during cycle T + r + c;
+//   PE(r,c) multiplies element r of that row during cycle T + r + c (PACK = 1 with an even N
+//   and 8-bit operands: the pe_pair of columns 2p and 2p+1 multiplies both during T + r + 2p,
+//   and column 2p+1's product joins its psum one cycle later, so the output timing is the same);
 //   out_valid/out_psum/out_tag for that row are presented in cycle T + LAT, LAT = 2N-1.
 // The pipeline never stalls; flow control is done by credits in array_ctrl.
 //
 // Weight load: one K-row per cycle. w_wr_en in cycle W writes w_wr_data into row w_wr_row
 // of bank w_wr_bank. The write travels along the row with the activations: PE(r,c) is
-// written at the end of cycle W + c (a skewed write wavefront). w_wr_int4=1 means
+// written at the end of cycle W + c (a skewed write wavefront); with packing (PACK = 1, the
+// default) column 2p+1 is written with column 2p, at the end of cycle W + 2p, the cycle its
+// pe_pair multiplies. The bank rules below hold unchanged in both cases, because the packed
+// column's write and read move one cycle earlier together. w_wr_int4=1 means
 // w_wr_data holds N packed INT4 weights in its low N*4 bits (C1b nibble order: element c
 // in bits [4c+3:4c]), each sign-extended to 8 bits here.
 //

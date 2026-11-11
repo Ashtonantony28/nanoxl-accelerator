@@ -1,7 +1,7 @@
 """AUDIT-2 repro tests (docs/audits/AUDIT-2.md).
 
-Failing findings are xfail(strict=True) with the finding id in the reason, so a fix turns them into
-XPASS (= a failure that says "remove the xfail"). Passing tests pin claims the audit re-derived
+Failing findings were xfail(strict=True) with the finding id in the reason; the AUDIT-2 fix branch
+closed all of them, and those tests now pin the fixes (test_a2_0x_*). Other tests pin claims the audit re-derived
 (arithmetic identities used by the SG11 area changes, the CSR map, ADR-005 compiler claims).
 Not collected by the default `pytest` (testpaths = tests/py, tests/rtl); run with
 
@@ -183,46 +183,113 @@ def _collect(paths, env_sim="icarus", marks="not slow"):
     return [ln.strip() for ln in r.stdout.splitlines() if "::" in ln]
 
 
-@pytest.mark.xfail(strict=True, reason="A2-01: CI (make test-fast SIM=icarus) never runs a VEC-engine "
-                   "or top config with L >= 16, so the multi-chunk beat assembly (4L > 16P), the shared "
-                   "SFU lanes (EL < L) and the 2-stage reduce tree are not exercised end to end in CI")
+def _make_cmd(target):
+    """The pytest selection a Makefile target runs: (SIM value, pytest args after `-m pytest`)."""
+    r = subprocess.run(["make", "-n", target], cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    line = next(ln for ln in r.stdout.splitlines() if "pytest" in ln)
+    sim = re.search(r"SIM=(\w+)", line)
+    import shlex
+    args = shlex.split(line.split("-m pytest", 1)[1])
+    return (sim.group(1) if sim else "icarus"), args
+
+
+def _ci():
+    import yaml
+    return yaml.safe_load(_src(".github/workflows/ci.yml"))
+
+
+def _verilator_fast_ids():
+    sim, args = _make_cmd("test-verilator-fast")
+    assert sim == "verilator"
+    paths = [a for a in args if a.startswith("tests/")]
+    marks = args[args.index("-m") + 1] if "-m" in args else ""
+    return _collect(paths, env_sim="verilator", marks=marks)
+
+
+# Fixed by the AUDIT-2 fix branch: these were xfail(strict) repros; they now pin the fix.
 def test_a2_01_ci_tier_runs_a_wide_vec_engine():
-    ids = _collect(["tests/rtl/test_vec_seq.py", "tests/rtl/test_top.py"])
+    """A2-01 (fixed): the per-push CI job verilator-fast (make test-verilator-fast) collects the
+    L >= 16 VEC engine benches (multi-chunk beat assembly, shared SFU lanes, 2-stage reduce tree)."""
+    ci = _ci()
+    on = ci.get("on", ci.get(True))
+    assert "push" in on and "pull_request" in on
+    steps = ci["jobs"]["verilator-fast"]["steps"]
+    assert any(st.get("run") == "make test-verilator-fast" for st in steps)
+    assert "if" not in ci["jobs"]["verilator-fast"]
+    ids = _verilator_fast_ids()
     assert ids, "collection failed"
-    wide = [i for i in ids if re.search(r"test_vec_seq\[(16|64)-", i)]
-    assert wide, ids
+    assert [i for i in ids if re.search(r"test_vec_seq\[16-1\]", i)], ids
+    assert [i for i in ids if re.search(r"test_vec_seq\[16-4\]", i)], ids
 
 
-@pytest.mark.xfail(strict=True, reason="A2-01: test_top_smoke_saturation / test_top_smoke_oreg are documented "
-                   "as fast tier but are Verilator-only; CI runs Icarus, so the SAT_0..4 CSR mapping (A1-02 "
-                   "fix) and OREG = 1 / per-buffer NB at top level are never checked in CI")
 def test_a2_01_ci_runs_top_saturation_and_oreg():
-    env = dict(os.environ, SIM="icarus")
-    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-m", "not slow",
-                        "tests/rtl/test_top.py", "-k", "saturation or oreg"], cwd=ROOT, env=env,
+    """A2-01 (fixed): test_top_smoke_saturation / _oreg / _pbuf_ch1 and test_top_smoke (with its decode
+    step) are in the Verilator per-push selection and are not skipped there (setup only, no sim)."""
+    ids = _verilator_fast_ids()
+    want = ["test_top_smoke", "test_top_smoke_saturation", "test_top_smoke_oreg", "test_top_smoke_pbuf_ch1"]
+    for w in want:
+        assert any(i.endswith("::" + w) for i in ids), (w, ids)
+    env = dict(os.environ, SIM="verilator")
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rs", "--setup-only", "-p", "no:cacheprovider",
+                        "-m", "not slow", "tests/rtl/test_top.py", "-k", "smoke"], cwd=ROOT, env=env,
                        capture_output=True, text=True, timeout=120)
-    assert "skipped" not in r.stdout, r.stdout[-400:]
+    assert r.returncode == 0 and "skipped" not in r.stdout, r.stdout[-400:]
+    # the decode step runs on Verilator (TOP_DECODE=1 in every smoke test there)
+    top = _src("tests/rtl/test_top.py")
+    assert 'TOP_DECODE=int(SIM == "verilator")' in top
+    # docstrings no longer call a Verilator-only test plain "Fast tier"
+    for m in re.finditer(r"@VERILATOR_ONLY\ndef (\w+)\(\w*\):\n    \"\"\"(.{0,40})", top):
+        assert not m.group(2).startswith("Fast tier"), m.group(1)
 
 
-@pytest.mark.xfail(strict=True, reason="A2-02: CI has no Verilator job and no slow/nightly job, so the "
-                   "headline bit-exact tests (test_top_tiny*, the only full-model RTL check) and every "
-                   "Verilator-only test never run automatically (design-plan G5 says CI on Verilator)")
 def test_a2_02_ci_runs_verilator_or_slow_tier():
-    ci = _src(".github/workflows/ci.yml")
-    assert "verilator" in ci.lower() or "test-slow" in ci or "-m slow" in ci
+    """A2-02 (fixed): CI builds Verilator v5.040 once (actions/cache keyed on the version) and runs the
+    full slow tier on Verilator nightly and on workflow_dispatch; the Icarus job stays."""
+    ci = _ci()
+    on = ci.get("on", ci.get(True))
+    assert "schedule" in on and "workflow_dispatch" in on
+    assert ci["env"]["VERILATOR_VERSION"] == "v5.040"
+    jobs = ci["jobs"]
+    assert any(st.get("run") == "make test-fast SIM=icarus" for st in jobs["fast"]["steps"])
+    build = jobs["verilator-build"]["steps"]
+    cache = next(st for st in build if str(st.get("uses", "")).startswith("actions/cache@"))
+    assert "VERILATOR_VERSION" in cache["with"]["key"]
+    assert any("cache-hit" in str(st.get("if", "")) for st in build)
+    slow = jobs["slow"]
+    assert "schedule" in slow["if"] and "workflow_dispatch" in slow["if"]
+    assert any(st.get("run") == "make test-slow SIM=verilator" for st in slow["steps"])
+    sim, args = _make_cmd("test-slow")
+    assert "slow" in args
+    ids = _collect(["tests/rtl/test_top.py"], env_sim="verilator", marks="slow")
+    assert sum("test_top_tiny[" in i for i in ids) == 4, ids
 
 
-@pytest.mark.xfail(strict=True, reason="A2-04: vec_reduce has no test at L = 32 / 64 (NTS = 3); the mutant "
-                   "vr_nts32 (NTS = 2 at L = 32, data and valid misaligned) survives every test")
+def test_a2_03_dma_ch1_pbuf_test_in_ci():
+    """A2-03 (fixed): test_top_smoke_pbuf_ch1 puts every parameter-block load on DMA channel 1, racing a
+    channel-0 PBUF load (kills top_snoop_ch1 / top_ch1_gate); it is in the per-push Verilator job."""
+    assert any(i.endswith("::test_top_smoke_pbuf_ch1") for i in _verilator_fast_ids())
+    assert 'TOP_PBUF_CHAN="ch1"' in _src("tests/rtl/test_top.py")
+
+
 def test_a2_04_vec_reduce_tested_at_three_tree_stages():
-    ids = _collect(["tests/rtl/test_vec_reduce.py"], marks="")
+    ids = _collect(["tests/rtl/test_vec_reduce.py"], marks="not slow")
     assert ids, "collection failed"
-    assert any(re.search(r"test_vec_reduce\[(32|64)\]", i) for i in ids), ids
+    assert any(re.search(r"test_vec_reduce\[32\]", i) for i in ids), ids
+    assert any(re.search(r"test_vec_reduce\[64\]", i) for i in ids), ids
+
+
+def test_a2_05_vec_seq_wr_wide_check():
+    """A2-05 (addressed by a check): vec_seq_wr carries a simulation-only check that a wide beat's
+    emitted chunks agree with the walker's row end ($fatal), and test_vec_seq_wr has a directed case
+    in which it fires (plus legal, interior-masked and ragged cases in which it must not)."""
+    src = _src("rtl/vec_seq_wr.sv")
+    assert "`ifndef SYNTHESIS" in src and "$fatal" in src and "w_rll != (h_last && hm == hn)" in src
+    ids = _collect(["tests/rtl/test_vec_seq_wr.py"], marks="not slow")
+    assert any("violate" in i for i in ids) and any("interior" in i for i in ids), ids
 
 
 # ----------------------------------------------------------------------------- docs (A2-0x)
-@pytest.mark.xfail(strict=True, reason="A2-06: PLAN.md still lists SG11c as 'wave 6' and the 'Status at "
-                   "pause' section calls SG11b/SG11c unmerged WIP, but both are merged on main")
 def test_a2_06_plan_status_current():
     plan = _src("PLAN.md")
     row = next(ln for ln in plan.splitlines() if ln.startswith("| SG11c "))
@@ -230,9 +297,6 @@ def test_a2_06_plan_status_current():
     assert "Unmerged, pushed as WIP branches" not in plan
 
 
-@pytest.mark.xfail(strict=True, reason="A2-06: docs/top.md §6 headline table ('As built') still shows the "
-                   "pre-SG10a cycles (W8A8 prefill 80,098); the built design measures 76,394 (§6.1 and "
-                   "this audit's re-run)")
 def test_a2_06_top_md_headline_table_is_current():
     sec = _src("docs/top.md")
     sec = sec[sec.index("## 6."):sec.index("### 6.1")]

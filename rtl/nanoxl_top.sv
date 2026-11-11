@@ -30,6 +30,13 @@ module nanoxl_top #(
     parameter int PBUF_LINES = 2048,       // 32 KiB
     parameter int KV_LINES   = 8192,       // 128 KiB
     parameter int NB         = 0,          // banks per buffer; 0 = 2 x widest port (power of two)
+    parameter int ABUF_NB    = 0,          // per-buffer bank count overrides; 0 = NB
+    parameter int WBUF_NB    = 0,
+    parameter int ACC_NB     = 0,
+    parameter int PBUF_NB    = 0,
+    parameter int KV_NB      = 0,
+    parameter int RAM_STYLE  = 0,          // banks: 0 tool's choice, 1 block RAM, 2 URAM if >= 2048 lines else block
+    parameter int OREG       = 0,          // 1: bank output register, scratchpad read latency 2
     parameter int VP         = 4,          // VEC engine port beat in 16-byte lines (A, B, P, D); 1 or 4
     parameter int AW         = 32,
     parameter int CTX_MAX    = 256,
@@ -387,9 +394,17 @@ module nanoxl_top #(
                 if (b_dv[b][p]) rs_d[p*PMAX*128 +: PMAX*128] = b_dd[b][p*PMAX*128 +: PMAX*128];
         end
     end
+    // the null buffer answers with the same latency as the banks (1 + OREG), so that responses
+    // of one port stay in order whatever buffers it reads
+    logic [NR-1:0] nul_d1;
     always_ff @(posedge clk) begin
-        if (!rst_n) nul_dv <= '0;
-        else        nul_dv <= rq_v & nul_r;
+        if (!rst_n) begin
+            nul_d1 <= '0;
+            nul_dv <= '0;
+        end else begin
+            nul_d1 <= rq_v & nul_r;
+            nul_dv <= (OREG != 0) ? nul_d1 : (rq_v & nul_r);
+        end
     end
 
     function automatic int blines(input int b);
@@ -401,8 +416,27 @@ module nanoxl_top #(
             default: blines = KV_LINES;
         endcase
     endfunction
+    function automatic int bnb(input int b);
+        int v;
+        case (b)
+            0:       v = ABUF_NB;
+            1:       v = WBUF_NB;
+            2:       v = ACC_NB;
+            3:       v = PBUF_NB;
+            default: v = KV_NB;
+        endcase
+        bnb = (v > 0) ? v : NBA;
+    endfunction
+    // bank primitive (spad_bank RAM_STYLE): URAM288 is 4096 x 72, so a 128-bit bank of >= 2048 lines
+    // fills whole URAMs (KV260: ABUF, ACC, KVBUF); shallower banks stay in RAMB36
+    function automatic int bstyle(input int b);
+        if (RAM_STYLE == 1)      bstyle = 1;
+        else if (RAM_STYLE == 2) bstyle = (blines(b) / bnb(b) >= 2048) ? 2 : 1;
+        else                     bstyle = 0;
+    endfunction
     for (genvar b = 0; b < 5; b++) begin : g_buf
-        buf_spad #(.LINES(blines(b)), .NB(NBA), .NR(NR), .NW(NW), .PMAX(PMAX), .RPL(RPL), .WPL(WPLV)) u_buf (
+        buf_spad #(.LINES(blines(b)), .NB(bnb(b)), .NR(NR), .NW(NW), .PMAX(PMAX), .RPL(RPL), .WPL(WPLV),
+                   .OREG(OREG), .RAM_STYLE(bstyle(b))) u_buf (
             .clk(clk), .rst_n(rst_n),
             .r_valid(b_rv[b]), .r_ready(b_rr[b]), .r_addr(rq_a), .d_valid(b_dv[b]), .d_data(b_dd[b]),
             .w_valid(b_wv[b]), .w_ready(b_wr[b]), .w_addr(wq_a), .w_data(wq_d), .w_strb(wq_s));

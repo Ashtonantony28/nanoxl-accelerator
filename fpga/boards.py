@@ -27,6 +27,7 @@ RTL_PARAMS = {
         PBUF_LINES=4096,       # 64 KiB   -> BRAM (8 banks x 512 lines)
         KV_LINES=65536,        # 1 MiB    -> URAM (8 banks x 8192 lines = 4 URAM288 each)
         NB=8,                  # = widest port (ACC, N/4 lines); auto (16) would waste half of every URAM
+        RAM_STYLE=2,           # banks of >= 2048 lines (ABUF, ACC, KVBUF) in URAM288, the rest RAMB36 (SG11b)
         VP=4,                  # 64-byte VEC engine ports (SG10b)
         CTX_MAX=256, D_MAX=384, NG=6, NSLOT=16, NCTX=8, MAXB=256, LDF=512,
     ),
@@ -38,6 +39,7 @@ RTL_PARAMS = {
         PBUF_LINES=2048,       # 32 KiB   (256-line banks: 2 RAMB36 each, half used)
         KV_LINES=8192,         # 128 KiB  (tiny fits on chip; shakespeare uses the DDR-KV mode)
         NB=0,                  # auto = 8 (2 x widest port: N/4 = VP = 4 lines)
+        RAM_STYLE=1,           # every bank in RAMB36 (the 256-line PBUF banks would otherwise be LUTRAM)
         VP=4,
         CTX_MAX=256, D_MAX=384, NG=6, NSLOT=16, NCTX=8, MAXB=256, LDF=512,
     ),

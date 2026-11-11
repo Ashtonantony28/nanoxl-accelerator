@@ -194,23 +194,30 @@ push (all Verilator fast tests above, the L = 16 VEC engine, exhaustive `pe_pair
 
 PERF_CYCLES per step (cycles the device was not idle), N=16, L=16, test buffers, AxiRam with no
 stalls (≈ 2-cycle DDR latency), against `cyclemodel.simulate(prog.cmds, hw, tm)` for the same program,
-`HwConfig` and VEC port width (`vec_port_lines` = VP). As built (VP = 4, 64-byte VEC ports, SG10b):
+`HwConfig` and VEC port width (`vec_port_lines` = VP). As built (VP = 4, 64-byte VEC ports, SG10b; two
+pipelined DMA masters, SG10a; re-measured on the SG11c RTL for AUDIT-2, `test_top_tiny` with `TOP_PERF_DIR`):
 
 | bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
 |---|---|---|
-| W8A8, on-chip | 80,098 / 81,226 (−1 %) | 66,104–66,216 / 70,073–70,185 (−6 %) |
-| W4A8, on-chip | 84,342 / 85,377 (−1 %) | 71,958–72,070 / 73,935–74,047 (−3 %) |
-| W8A8, DDR KV | 80,271 / 86,150 (−7 %) | 66,360–66,528 / 72,189–72,637 (−8 %) |
-| W4A8, DDR KV | 84,749 / 90,909 (−7 %) | 72,254–72,422 / 76,363–76,811 (−6 %) |
+| W8A8, on-chip | 76,394 / 79,088 (−3 %) | 61,923–62,035 / 63,269–63,381 (−2 %) |
+| W4A8, on-chip | 82,598 / 83,287 (−1 %) | 68,730–68,842 / 69,760–69,872 (−1 %) |
+| W8A8, DDR KV | 77,929 / 83,790 (−7 %) | 62,378–62,544 / 64,967–65,135 (−4 %) |
+| W4A8, DDR KV | 83,065 / 88,870 (−7 %) | 69,359–69,526 / 71,917–72,085 (−4 %) |
 
-With 16-byte VEC ports (VP = 1, `test_top_tiny_vp1`; identical to the SG7c measurement):
+The model is pessimistic here because it charges its fixed 300 ns DDR latency, which the AxiRam
+does not have; at 75 cycles of AXI latency it is within 0.1 % on decode (§6.1). SG11a-c did not move
+these counts (identical to the SG10a "after" row of §6.1). Pre-SG10a (one DMA master, as SG10b
+merged): W8A8 on-chip 80,098 / 66,104–66,216, W4A8 84,342 / 71,958–72,070, W8A8 DDR KV 80,271 /
+66,360–66,528, W4A8 DDR KV 84,749 / 72,254–72,422.
+
+With 16-byte VEC ports (VP = 1, `test_top_tiny_vp1`; measured before SG10a, identical to the SG7c measurement):
 
 | bundle, KV | prefill 16 rows: measured / model | decode (pos 16..23): measured / model |
 |---|---|---|
 | W8A8, on-chip, VP = 1 | 88,976 / 90,227 (−1 %) | 67,241–67,365 / 70,745–70,857 (−5 %) |
 | W4A8, on-chip, VP = 1 | 96,202 / 96,900 (−1 %) | 72,815–72,939 / 74,843–74,955 (−3 %) |
 
-**VP = 1 → 4:** prefill −10.0 % (W8A8) and −12.3 % (W4A8); decode −1.7 % / −1.2 % (M = 1 VEC work is
+**VP = 1 → 4** (both before SG10a, i.e. against the pre-SG10a counts listed above): prefill −10.0 % (W8A8) and −12.3 % (W4A8); decode −1.7 % / −1.2 % (M = 1 VEC work is
 small next to the weight stream). VEC engine busy in the W8A8 on-chip prefill 47.9k → 26.8k cycles
 (model 48.0k → 26.9k, within 0.3 %); W4A8 47.4k → 26.3k. The other engines do not move: ARRAY 56.3k
 (model 51.3k: GEMM_GS / tile bubbles), DMA 56.0k (model 62.0k: the model's 300 ns DDR latency is not

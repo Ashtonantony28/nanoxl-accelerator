@@ -15,6 +15,22 @@ A systolic-array INT8/INT4 transformer inference accelerator in SystemVerilog. I
 | FPGA | Vivado 2024.2 build scripts for KV260 (primary) and PYNQ-Z2 in `fpga/`; Yosys resource estimates in `bench/results/`. **Nothing has been through Vivado or on a board yet** (`docs/fpga.md` has the bring-up guide). |
 | Verification | About 250 Python tests and about 140 cocotb tests (Icarus and Verilator), formal proofs (yosys-smtbmc), and two independent audits (`docs/audits/`) with every finding closed. CI runs Icarus and Verilator on each push, plus a nightly slow tier. |
 
+## Gallery
+
+![The compiled tiny nanoGPT generating text through the host driver](docs/media/generate.gif)
+
+*The trained `tiny` model (W8A8) generating Shakespeare-style text through the host driver's `SimBackend`. This is a **functional simulation** of the compiled command stream, which is bit-exact against the integer golden model and the Verilator RTL. Device time comes from the measured-cost cycle model for the as-built KV260 configuration (N = 8, 200 MHz); nothing has run on a board yet. [MP4](docs/media/generate.mp4)*
+
+![Weight-stationary systolic dataflow, cycle by cycle](docs/media/dataflow.gif)
+
+*Weight-stationary dataflow in an 8x8 array: weights stay in each PE, skewed activations move right, partial sums move down and leave deskewed. A cycle-level Python model of the array; the script asserts its result equals `A @ W` exactly. [MP4](docs/media/dataflow.mp4)*
+
+![Roofline of the modelled designs](bench/results/roofline.png)
+
+*Roofline from the cycle model (`bench/results/roofline.*`).*
+
+Regenerate the animations with `python3 scripts/media.py` (needs matplotlib and ffmpeg).
+
 ## Quick start
 
 ```bash
